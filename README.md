@@ -1,3 +1,15 @@
+---
+title: MCQ Generator
+emoji: 📝
+colorFrom: blue
+colorTo: indigo
+sdk: gradio
+sdk_version: "4.40.0"
+app_file: gradio_app.py
+pinned: false
+license: mit
+---
+
 # MCQ Generator — Tạo câu hỏi trắc nghiệm tự động từ PDF Slides
 
 > Thesis Project: PDF Slides → MCQ tự động với Gemini API + Gradio  
