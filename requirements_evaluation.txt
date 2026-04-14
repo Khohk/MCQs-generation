@@ -1,0 +1,16 @@
+# Evaluation Framework Requirements
+# Install: pip install -r requirements_evaluation.txt
+
+# ─── LLM APIs ──────────────────────────────────────────────────
+openai>=1.0.0                 # GPT-4 Turbo for LLM-as-a-judge evaluation
+google-genai>=1.0.0           # Gemini for MCQ generation (already in main requirements)
+
+# ─── Environment & Config ──────────────────────────────────────
+python-dotenv>=1.0.0          # Load OPENAI_API_KEY and GEMINI_API_KEY from .env
+
+# ─── Data & Export ────────────────────────────────────────────
+pandas>=2.0.0                 # CSV export for analysis
+openpyxl>=3.1.0               # Excel export
+
+# ─── Async Support ────────────────────────────────────────────
+# Standard library (no additional install needed)

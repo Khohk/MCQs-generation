@@ -1,0 +1,34 @@
+# ─── Multi-format Parsing ──────────────────────────────────────
+python-docx>=1.1.0       # DOCX parser
+python-pptx>=0.6.23      # PPTX parser
+
+# ─── PDF Parsing ───────────────────────────────────────────────
+pymupdf>=1.25.4          # fitz: fast text + font metadata extraction
+pdfplumber>=0.11.0       # layout-aware extraction (fallback / tables)
+
+# ─── Gemini API ────────────────────────────────────────────────
+google-genai>=1.0.0      # NEW unified SDK (google-generativeai đã deprecated Nov 2025)
+
+# ─── Streamlit UI ──────────────────────────────────────────────
+streamlit>=1.43.0
+
+# ─── Export ────────────────────────────────────────────────────
+openpyxl>=3.1.0          # Kahoot Excel export
+pandas>=2.2.0            # Quizizz CSV + data manipulation
+
+# ─── Evaluation Framework ──────────────────────────────────────
+openai>=1.0.0            # LLM-as-a-judge (GPT-4 for evaluating MCQs)
+python-dotenv>=1.0.0     # Environment variable management
+
+# ─── Evaluation (scorer.py — cài sau) ──────────────────────────
+# bert-score>=0.3.13     # BERTScore (requires torch, nặng ~2GB)
+# torch>=2.2.0           # bert-score dependency
+# sentence-transformers>=3.0.0   # cosine similarity cho distractor
+# rouge-score>=0.1.2     # ROUGE metric
+# nltk>=3.8.0            # BLEU metric
+
+# ─── Utilities ─────────────────────────────────────────────────
+python-dotenv>=1.0.0     # load .env → GEMINI_API_KEY
+tqdm>=4.66.0             # progress bar khi process nhiều chunk
+
+gradio>=4.40.0

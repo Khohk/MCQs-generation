@@ -1,0 +1,64 @@
+
+MCQ QUALITY EVALUATION REPORT
+================================================================================
+
+Framework: Item-Writing Flaws (IWFs) + Semantic Quality Assessment
+Judge Model: Cross-model (LLM-as-a-judge via gpt-4-turbo)
+Reference: Arif et al. (L@S '24), Elkins et al. (AAAI '24)
+
+SUMMARY STATISTICS
+--------------------------------------------------------------------------------
+Total MCQs Evaluated: 2
+Production-Ready (Pass): 0 (0.0%)
+Borderline: 0
+Needs Revision (Fail): 2
+
+SEMANTIC QUALITY AVERAGES (Likert 1-5)
+--------------------------------------------------------------------------------
+Relevance: 3.0/5
+Answerability: 3.0/5
+Bloom Alignment: 3.0/5
+Overall Semantic Average: 3.0/5
+
+TOP 3 MOST COMMON FLAWS
+--------------------------------------------------------------------------------
+
+PERFORMANCE BY BLOOM LEVEL
+--------------------------------------------------------------------------------
+
+apply:
+  Count: 1
+  IWF Pass Rate: 100.0%
+  Semantic Average: 3.0/5
+  Production-Ready: 0.0%
+
+understand:
+  Count: 1
+  IWF Pass Rate: 100.0%
+  Semantic Average: 3.0/5
+  Production-Ready: 0.0%
+
+EVALUATION CRITERIA
+--------------------------------------------------------------------------------
+PASS: IWF Pass Rate ≥ 80% AND Semantic Average ≥ 4.0
+BORDERLINE: IWF Pass Rate ≥ 70% AND Semantic Average ≥ 3.5
+FAIL: Below borderline thresholds
+
+Item-Writing Flaws (10 rules):
+1. Unfocused Stem
+2. Unclear Information
+3. Negative Wording Without Emphasis
+4. Implausible Distractors
+5. Heterogeneous Options
+6. Longest Answer Correct Bias
+7. Word Repeats
+8. Absolute Terms in Distractors
+9. Multiple Correct Answers
+10. Factual Error
+
+Semantic Quality (3 Likert 1-5 dimensions):
+1. Relevance: Connection to source content
+2. Answerability: Can be answered using only source
+3. Bloom Alignment: Matches labeled Bloom level
+
+================================================================================

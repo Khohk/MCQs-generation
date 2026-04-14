@@ -1,0 +1,94 @@
+{
+  "metadata": {
+    "judge_model": "gpt-4-turbo",
+    "total_mcqs": 2,
+    "evaluation_framework": "IWF (10 rules) + Semantic Quality (3 Likert dimensions)"
+  },
+  "summary_statistics": {
+    "pass_statistics": {
+      "total_evaluated": 2,
+      "pass": 0,
+      "borderline": 0,
+      "fail": 2,
+      "pass_rate": 0.0,
+      "production_ready_rate": 0.0
+    },
+    "semantic_averages": {
+      "relevance": 3.0,
+      "answerability": 3.0,
+      "bloom_alignment": 3.0,
+      "overall": 3.0
+    },
+    "top_3_flaws": {},
+    "by_bloom_level": {
+      "understand": {
+        "count": 1,
+        "pass_rate": 0.0,
+        "flaw_pass_rate": 1.0,
+        "semantic_avg": 3.0
+      },
+      "apply": {
+        "count": 1,
+        "pass_rate": 0.0,
+        "flaw_pass_rate": 1.0,
+        "semantic_avg": 3.0
+      }
+    }
+  },
+  "evaluations": [
+    {
+      "question_id": "sample_1",
+      "question_text": "What is database normalization?",
+      "correct_answer": "B",
+      "bloom_level": "understand",
+      "flaws": {
+        "unfocused_stem": false,
+        "unclear_information": false,
+        "negative_wording_without_emphasis": false,
+        "implausible_distractors": false,
+        "heterogeneous_options": false,
+        "longest_answer_correct_bias": false,
+        "word_repeats": false,
+        "absolute_terms_in_distractors": false,
+        "multiple_correct_answers": false,
+        "factual_error": false
+      },
+      "flaw_pass_rate": 1.0,
+      "semantic": {
+        "relevance": 3,
+        "answerability": 3,
+        "bloom_alignment": 3
+      },
+      "semantic_average": 3.0,
+      "overall_verdict": "fail",
+      "feedback": "Placeholder - integrate with LLM judge"
+    },
+    {
+      "question_id": "sample_2",
+      "question_text": "Which normal form eliminates non-key dependencies?",
+      "correct_answer": "C",
+      "bloom_level": "apply",
+      "flaws": {
+        "unfocused_stem": false,
+        "unclear_information": false,
+        "negative_wording_without_emphasis": false,
+        "implausible_distractors": false,
+        "heterogeneous_options": false,
+        "longest_answer_correct_bias": false,
+        "word_repeats": false,
+        "absolute_terms_in_distractors": false,
+        "multiple_correct_answers": false,
+        "factual_error": false
+      },
+      "flaw_pass_rate": 1.0,
+      "semantic": {
+        "relevance": 3,
+        "answerability": 3,
+        "bloom_alignment": 3
+      },
+      "semantic_average": 3.0,
+      "overall_verdict": "fail",
+      "feedback": "Placeholder - integrate with LLM judge"
+    }
+  ]
+}
