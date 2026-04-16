@@ -118,7 +118,6 @@ Generate exactly {n_questions} MCQ(s) based ONLY on the content above.{image_ins
 Each wrong answer (distractor) must:
 1. Be the SAME TYPE as the correct answer (e.g., if answer is an algorithm name, all distractors are algorithm names)
 2. Be PLAUSIBLE — a student who hasn't studied might choose it
-3. Be CLEARLY WRONG to someone who understands the material
 4. NOT be "All of the above" / "None of the above" / "Both A and B"
 5. Be similar in length and grammatical structure to the correct answer
 6. Be COMPLETELY DIFFERENT from the correct answer — never copy, paraphrase, or repeat the correct answer text
