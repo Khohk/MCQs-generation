@@ -18,20 +18,33 @@ Usage:
 
 from pathlib import Path
 
-SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".pptx"}
+# .pdf → pdf_parser (PyMuPDF, tốt nhất cho PDF)
+# các format còn lại → markitdown_parser
+SUPPORTED_EXTENSIONS = {
+    ".pdf",
+    ".pptx", ".docx",
+    ".xlsx", ".xls",
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+}
+
+_MARKITDOWN_EXTENSIONS = {
+    ".pptx", ".docx",
+    ".xlsx", ".xls",
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+}
 
 
 def parse_file(file_path: str, **kwargs) -> list[dict]:
     """
     Auto-detect file type và gọi đúng parser.
 
-    Args:
-        file_path: đường dẫn tới file
-        **kwargs : tham số bổ sung truyền thẳng vào parser
+    Routing:
+      .pdf              → pdf_parser.py  (PyMuPDF + pdfplumber)
+      .pptx/.docx/.xlsx → markitdown_parser.py
+      images            → markitdown_parser.py (vision)
 
     Returns:
-        List[{page_num, title, text, char_count}]
-        — cùng schema với pdf_parser.parse_pdf()
+        List[{page_num, title, text, char_count, has_image?}]
     """
     path = Path(file_path)
     ext  = path.suffix.lower()
@@ -49,13 +62,9 @@ def parse_file(file_path: str, **kwargs) -> list[dict]:
         from pipeline.pdf_parser import parse_pdf
         return parse_pdf(file_path, **kwargs)
 
-    elif ext == ".docx":
-        from pipeline.docx_parser import parse_docx
-        return parse_docx(file_path, **kwargs)
-
-    elif ext == ".pptx":
-        from pipeline.pptx_parser import parse_pptx
-        return parse_pptx(file_path, **kwargs)
+    elif ext in _MARKITDOWN_EXTENSIONS:
+        from pipeline.markitdown_parser import parse_to_pages
+        return parse_to_pages(file_path)
 
 
 def get_metadata(file_path: str) -> dict:
@@ -70,13 +79,15 @@ def get_metadata(file_path: str) -> dict:
         from pipeline.pdf_parser import get_pdf_metadata
         return get_pdf_metadata(file_path)
 
-    elif ext == ".docx":
-        from pipeline.docx_parser import get_docx_metadata
-        return get_docx_metadata(file_path)
-
-    elif ext == ".pptx":
-        from pipeline.pptx_parser import get_pptx_metadata
-        return get_pptx_metadata(file_path)
+    # Với các format MarkItDown: đếm sections làm "pages"
+    if ext in _MARKITDOWN_EXTENSIONS:
+        from pipeline.markitdown_parser import parse_to_pages
+        pages = parse_to_pages(file_path)
+        return {
+            "total_pages"  : len(pages),
+            "title"        : pages[0]["title"] if pages else "",
+            "file_size_kb" : round(path.stat().st_size / 1024, 1),
+        }
 
     return {"total_pages": 0, "title": "", "file_size_kb": 0}
 
@@ -90,9 +101,13 @@ def get_file_type(file_path: str) -> str:
     """Trả về tên loại file dễ đọc."""
     ext = Path(file_path).suffix.lower()
     return {
-        ".pdf":  "PDF",
-        ".docx": "Word Document",
+        ".pdf" : "PDF",
         ".pptx": "PowerPoint",
+        ".docx": "Word",
+        ".xlsx": "Excel", ".xls": "Excel",
+        ".jpg" : "Image",  ".jpeg": "Image",
+        ".png" : "Image",  ".gif" : "Image",
+        ".bmp" : "Image",  ".webp": "Image",
     }.get(ext, "Unknown")
 
 

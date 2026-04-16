@@ -5,6 +5,8 @@ Prompt engineering cho Gemini MCQ generation.
 Techniques: Bloom's Taxonomy, difficulty-aware, distractor quality control.
 """
 
+import re
+
 # ── Bloom's Taxonomy mapping ───────────────────────────────────────
 BLOOM_BY_DIFFICULTY = {
     "easy":   ["remember", "understand"],
@@ -41,6 +43,24 @@ EXAMPLE OUTPUT (1 MCQ):
 """.strip()
 
 
+# ── Markdown cleaner ───────────────────────────────────────────────
+
+def _clean_chunk_text(text: str) -> str:
+    """
+    Clean markdown chunk text trước khi đưa vào prompt.
+    Giữ lại nội dung học thuật, bỏ metadata cấu trúc.
+    """
+    # Bỏ HTML comments (<!-- Slide number: N -->, <!-- Notes -->, v.v.)
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+    # Đổi image syntax ![alt](src) → [Image: alt] để Gemini biết có hình
+    text = re.sub(r"!\[([^\]]*)\]\([^\)]*\)", r"[Image: \1]", text)
+    # Bỏ ## heading (đã có topic ở trên, tránh lặp)
+    text = re.sub(r"^#{1,3}\s+.+$", "", text, flags=re.MULTILINE)
+    # Collapse nhiều dòng trắng liên tiếp thành 1
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 # ── Main prompt builder ────────────────────────────────────────────
 
 def build_prompt(
@@ -52,7 +72,7 @@ def build_prompt(
     Build full prompt string cho 1 chunk.
 
     Args:
-        chunk      : {chunk_id, topic, pages, text}
+        chunk      : {chunk_id, topic, pages, text, has_image}
         n_questions: số MCQ cần sinh
         difficulty : "easy" | "medium" | "hard"
 
@@ -64,6 +84,17 @@ def build_prompt(
         f"{lvl} ({BLOOM_DESCRIPTIONS[lvl]})" for lvl in bloom_levels
     )
 
+    clean_text = _clean_chunk_text(chunk["text"])
+    has_image  = chunk.get("has_image", False)
+
+    # Instruction bổ sung nếu chunk có ảnh được mô tả
+    image_instruction = ""
+    if has_image:
+        image_instruction = (
+            "\n- This slide contains visual content (diagrams/charts) marked as [Image: ...]. "
+            "Generate at least 1 question that tests understanding of that visual content."
+        )
+
     prompt = f"""You are an expert educator creating multiple-choice questions (MCQs) for university students.
 
 ## SOURCE CONTENT
@@ -72,11 +103,11 @@ Pages: {chunk['pages']}
 Chunk ID: {chunk['chunk_id']}
 
 --- BEGIN CONTENT ---
-{chunk['text']}
+{clean_text}
 --- END CONTENT ---
 
 ## YOUR TASK
-Generate exactly {n_questions} MCQ(s) based ONLY on the content above.
+Generate exactly {n_questions} MCQ(s) based ONLY on the content above.{image_instruction}
 
 ## DIFFICULTY & BLOOM'S TAXONOMY
 - Difficulty level: {difficulty.upper()}

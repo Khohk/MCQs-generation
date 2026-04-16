@@ -64,11 +64,16 @@ def parse_pdf(pdf_path: str) -> list[dict]:
                 _log(f"  page {page_num}: SKIP (only {char_count} chars)")
                 continue
 
+            # Convert sang markdown để đồng nhất với các parser khác
+            title_str = title or f"Page {page_num}"
+            md_text   = _to_markdown(title_str, text)
+
             pages.append({
                 "page_num":   page_num,
-                "title":      title or f"Page {page_num}",
-                "text":       text,
-                "char_count": char_count,
+                "title":      title_str,
+                "text":       md_text,
+                "char_count": len(md_text),
+                "has_image":  False,   # PDF plain text, không detect ảnh
             })
 
     pages.sort(key=lambda p: p["page_num"])
@@ -135,6 +140,21 @@ def _extract_pdfplumber(pdf_path: str, page_idx: int) -> tuple[str, str | None]:
     except Exception as e:
         _log(f"  pdfplumber error on page {page_idx+1}: {e}")
         return "", None
+
+
+# ── Markdown converter ─────────────────────────────────────────────
+
+def _to_markdown(title: str, text: str) -> str:
+    """
+    Convert plain text page → markdown string.
+    Format: ## title + bullet lines.
+    """
+    lines = [line.rstrip() for line in text.splitlines()]
+    body  = "\n".join(
+        f"- {line}" if line and not line.startswith("-") else line
+        for line in lines
+    )
+    return f"## {title}\n\n{body}"
 
 
 # ── Utility ────────────────────────────────────────────────────────

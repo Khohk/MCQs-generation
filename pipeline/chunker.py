@@ -158,15 +158,16 @@ def _chunk_fixed(pages: list[dict], size: int, max_pages: int) -> list[dict]:
 
 def _build_chunk(pages: list[dict]) -> dict:
     """Tạo chunk dict từ list pages."""
-    # Topic = title của trang đầu tiên trong chunk
-    topic = pages[0]["title"] if pages else "Unknown"
-    text = "\n\n".join(p["text"] for p in pages)
+    topic     = pages[0]["title"] if pages else "Unknown"
+    text      = "\n\n".join(p["text"] for p in pages)
     page_nums = [p["page_num"] for p in pages]
+    has_image = any(p.get("has_image", False) for p in pages)
     return {
-        "chunk_id": "",          # sẽ gán lại ở cuối
-        "topic":    topic,
-        "pages":    page_nums,
-        "text":     text,
+        "chunk_id" : "",          # sẽ gán lại ở cuối
+        "topic"    : topic,
+        "pages"    : page_nums,
+        "text"     : text,
+        "has_image": has_image,
     }
 
 
@@ -224,25 +225,32 @@ def _log(msg: str):
 
 if __name__ == "__main__":
     import sys
-    from pipeline.pdf_parser import parse_pdf
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from pipeline.file_router import parse_file, get_file_type
 
-    # Fix encoding trên Windows terminal
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
     if len(sys.argv) < 2:
-        print("Usage: python pipeline/chunker.py <path_to_pdf> [strategy] [max_pages]")
-        print("       strategy: auto | title | fixed  (default: auto)")
-        print("       max_pages: int                  (default: 6)")
+        print("Usage: python pipeline/chunker.py <file> [strategy] [max_pages]")
+        print("       file     : .pdf | .pptx | .docx | .xlsx | image")
+        print("       strategy : auto | title | fixed  (default: auto)")
+        print("       max_pages: int                   (default: 6)")
         sys.exit(1)
 
-    pdf_path   = sys.argv[1]
-    strategy   = sys.argv[2] if len(sys.argv) > 2 else "auto"
-    max_pages  = int(sys.argv[3]) if len(sys.argv) > 3 else MAX_PAGES_PER_CHUNK
+    file_path = sys.argv[1]
+    strategy  = sys.argv[2] if len(sys.argv) > 2 else "auto"
+    max_pages = int(sys.argv[3]) if len(sys.argv) > 3 else MAX_PAGES_PER_CHUNK
 
-    print(f"\nParsing PDF...")
-    pages = parse_pdf(pdf_path)
-    print(f"Pages parsed: {len(pages)}\n")
+    print(f"\n{'='*60}")
+    print(f"  File  : {file_path}")
+    print(f"  Type  : {get_file_type(file_path)}")
+    print(f"{'='*60}")
+
+    print(f"\nParsing...")
+    pages = parse_file(file_path)
+    print(f"Pages/sections parsed: {len(pages)}\n")
 
     print(f"Chunking (strategy='{strategy}', max_pages={max_pages})...")
     chunks = chunk_pages(pages, strategy=strategy, max_pages=max_pages)
@@ -253,11 +261,19 @@ if __name__ == "__main__":
     print(f"  Chunks : {len(chunks)}  (ratio: {len(pages)/len(chunks):.1f} pages/chunk)")
     print(f"{'='*60}\n")
 
-    print(f"{'CHUNK':<12} {'TOPIC':<40} {'PAGES':<15} {'CHARS'}")
-    print("-" * 75)
+    print(f"{'CHUNK':<12} {'IMG':<5} {'TOPIC':<38} {'PAGES':<14} {'CHARS'}")
+    print("-" * 78)
     for c in chunks:
         pages_str = str(c["pages"]) if len(c["pages"]) <= 4 else f"[{c['pages'][0]}..{c['pages'][-1]}]"
-        print(f"  {c['chunk_id']:<10} {c['topic'][:38]:<40} {pages_str:<15} {len(c['text'])}")
+        img_flag  = "YES" if c.get("has_image") else "-"
+        print(f"  {c['chunk_id']:<10} {img_flag:<5} {c['topic'][:36]:<38} {pages_str:<14} {len(c['text'])}")
+
+    # ── Markdown preview chunk đầu ──
+    if chunks:
+        print(f"\n--- Markdown preview (chunk_001) ---")
+        print(chunks[0]["text"][:600])
+        if len(chunks[0]["text"]) > 600:
+            print(f"... ({len(chunks[0]['text']) - 600} more chars)")
 
     # ── Auto checks ──
     print("\n--- Auto checks ---")
@@ -274,6 +290,9 @@ if __name__ == "__main__":
 
     unique_topics = len(set(c["topic"] for c in chunks))
     print(f"  Unique topics      : {unique_topics}/{len(chunks)}  {'[OK]' if unique_topics/len(chunks) > 0.5 else '[WARN] nhieu topic bi trung'}")
+
+    img_chunks = sum(1 for c in chunks if c.get("has_image"))
+    print(f"  Chunks with image  : {img_chunks}/{len(chunks)}")
 
     ids = [c["chunk_id"] for c in chunks]
     print(f"  chunk_id unique    : {'[OK]' if len(ids) == len(set(ids)) else '[FAIL]'}")
