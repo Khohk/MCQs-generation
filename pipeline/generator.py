@@ -36,19 +36,19 @@ load_dotenv()
 
 PROVIDERS = [
     # Primary — Gemini (chất lượng tốt nhất, JSON mode native)
-    {"provider": "gemini",     "model": "gemini-2.5-flash",         "tpm": 1_000_000},
-    {"provider": "gemini",     "model": "gemini-2.0-flash",         "tpm": 1_000_000},
-    {"provider": "gemini",     "model": "gemini-2.0-flash-lite",    "tpm": 1_000_000},
+    {"provider": "gemini",     "model": "gemini-2.5-flash",              "tpm": 1_000_000},
+    {"provider": "gemini",     "model": "gemini-2.0-flash",              "tpm": 1_000_000},
+    {"provider": "gemini",     "model": "gemini-2.0-flash-lite",         "tpm": 1_000_000},
 
     # Fallback 1 — Cerebras (nhanh, 1M token/ngày, TPM cao)
-    {"provider": "cerebras",   "model": "llama3.3-70b",             "tpm": 60_000},
+    {"provider": "cerebras",   "model": "llama3.1-70b",                  "tpm": 60_000},
 
     # Fallback 2 — Groq (free nhưng TPM thấp)
-    {"provider": "groq",       "model": "llama-3.3-70b-versatile",  "tpm": 6_000},
-    {"provider": "groq",       "model": "llama4-scout-17b-16e",     "tpm": 6_000},
+    {"provider": "groq",       "model": "llama-3.3-70b-versatile",       "tpm": 6_000},
+    {"provider": "groq",       "model": "meta-llama/llama-4-scout-17b-16e-instruct", "tpm": 6_000},
 
     # Fallback 3 — OpenRouter (last resort)
-    {"provider": "openrouter", "model": "meta-llama/llama-4-scout:free", "tpm": 20_000},
+    {"provider": "openrouter", "model": "meta-llama/llama-3.3-70b-instruct:free", "tpm": 20_000},
 ]
 
 RETRY_LIMIT    = 2      # số lần retry trên cùng 1 provider trước khi chuyển
@@ -61,6 +61,7 @@ CHECKPOINT_DIR = Path("data/checkpoints")
 # ── Provider state ─────────────────────────────────────────────────
 _current_provider_idx = 0
 _provider_cooldown: dict[int, float] = {}   # idx → thời điểm có thể dùng lại
+_provider_disabled: set[int] = set()        # idx → disabled vĩnh viễn (404/no key)
 COOLDOWN_SECONDS = 60.0
 
 
@@ -96,23 +97,32 @@ def _get_openai_compat_client(provider: str):
 
 def _next_available_provider() -> int | None:
     """
-    Tìm provider tiếp theo không bị cooldown.
+    Tìm provider tiếp theo không bị cooldown và không bị disabled.
     Trả về index hoặc None nếu tất cả đang cooling down.
     """
     now = time.time()
     for i in range(len(PROVIDERS)):
         idx = (_current_provider_idx + i) % len(PROVIDERS)
+        if idx in _provider_disabled:
+            continue
         if now >= _provider_cooldown.get(idx, 0):
             return idx
     return None
 
 
 def _mark_cooldown(idx: int):
-    """Đánh dấu provider đang bị rate limit, chờ COOLDOWN_SECONDS."""
+    """Đánh dấu provider bị rate limit, chờ COOLDOWN_SECONDS."""
     _provider_cooldown[idx] = time.time() + COOLDOWN_SECONDS
     p = PROVIDERS[idx]
     _log(f"    [cooldown] {p['provider']}/{p['model'].split('/')[-1]} "
          f"cooling down {COOLDOWN_SECONDS}s")
+
+
+def _mark_disabled(idx: int, reason: str):
+    """Disable vĩnh viễn trong session — dùng cho 404 và missing key."""
+    _provider_disabled.add(idx)
+    p = PROVIDERS[idx]
+    _log(f"    [disabled] {p['provider']}/{p['model'].split('/')[-1]}: {reason}")
 
 
 # ── Unified API call ───────────────────────────────────────────────
@@ -172,8 +182,14 @@ def _generate_for_chunk(chunk: dict, n_questions: int, difficulty: str) -> list[
         idx = _next_available_provider()
 
         if idx is None:
-            # Tất cả đang cooldown — chờ provider nào hết sớm nhất
-            wait = min(_provider_cooldown.values()) - time.time()
+            # Kiểm tra còn provider nào không bị disabled không
+            active = [i for i in range(len(PROVIDERS)) if i not in _provider_disabled]
+            if not active:
+                _log("    Tat ca provider deu bi disabled (404/no key). ABORT.")
+                break
+            # Chờ provider cooldown sớm nhất trong số active
+            active_cooldowns = {i: _provider_cooldown.get(i, 0) for i in active}
+            wait = min(active_cooldowns.values()) - time.time()
             wait = max(wait, 1.0)
             _log(f"    Tat ca provider dang cooldown, cho {wait:.0f}s...")
             time.sleep(wait)
@@ -202,21 +218,28 @@ def _generate_for_chunk(chunk: dict, n_questions: int, difficulty: str) -> list[
             _log(f"    [attempt {attempt+1}] {label}: {err[:100]}")
 
             is_rate_limit = any(k in err for k in ("429", "RESOURCE_EXHAUSTED", "rate_limit", "RateLimitError"))
-            is_not_found  = any(k in err for k in ("404", "NOT_FOUND", "model_not_found"))
+            is_not_found  = any(k in err for k in ("404", "NOT_FOUND", "model_not_found", "does not exist"))
             is_no_key     = "not found in .env" in err
 
-            if is_rate_limit or is_not_found or is_no_key:
+            if is_not_found or is_no_key:
+                # Model không tồn tại / không có key → disable vĩnh viễn, không retry
+                reason = "model not found" if is_not_found else "no API key"
+                _mark_disabled(idx, reason)
+            elif is_rate_limit:
+                # Rate limit → cooldown tạm thời
                 _mark_cooldown(idx)
-                # Chuyển ngay sang provider tiếp theo
-                next_idx = _next_available_provider()
-                if next_idx is not None and next_idx != idx:
-                    _current_provider_idx = next_idx
-                    next_p = PROVIDERS[next_idx]
-                    _log(f"    Switch -> {next_p['provider']}/{next_p['model'].split('/')[-1]}")
-                time.sleep(SWITCH_DELAY)
             else:
-                # Lỗi khác (network, timeout) — retry cùng provider
+                # Lỗi khác (network, timeout) → retry cùng provider
                 time.sleep(5)
+                continue
+
+            # Chuyển sang provider tiếp theo
+            next_idx = _next_available_provider()
+            if next_idx is not None and next_idx != idx:
+                _current_provider_idx = next_idx
+                next_p = PROVIDERS[next_idx]
+                _log(f"    Switch -> {next_p['provider']}/{next_p['model'].split('/')[-1]}")
+            time.sleep(SWITCH_DELAY)
 
     _log(f"    SKIP {chunk['chunk_id']} sau {attempts_total} attempts")
     return []
