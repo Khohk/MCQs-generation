@@ -35,4 +35,5 @@ python-dotenv>=1.0.0     # Environment variable management
 python-dotenv>=1.0.0     # load .env → GEMINI_API_KEY
 tqdm>=4.66.0             # progress bar khi process nhiều chunk
 
-gradio>=4.40.0
+pillow>=10.4.0           # Python 3.13 compatible (bắt buộc pin cho HF Spaces)
+gradio>=5.0.0
