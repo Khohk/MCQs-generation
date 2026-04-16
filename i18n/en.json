@@ -1,0 +1,83 @@
+{
+  "app_title": "AI MCQ Generator",
+  "app_subtitle": "Generate multiple-choice questions from your documents",
+  "lang_switch": "Tiếng Việt",
+
+  "upload": {
+    "tab": "Create Quiz",
+    "drop_label": "Drop files here",
+    "drop_hint": "Supports PDF, DOCX, PPTX",
+    "file_count": "{n} files · {p} pages",
+    "difficulty_label": "Difficulty",
+    "difficulty_easy": "Easy",
+    "difficulty_medium": "Medium",
+    "difficulty_hard": "Hard",
+    "density_label": "Question density",
+    "density_low": "Low",
+    "density_medium": "Medium",
+    "density_high": "High",
+    "lang_label": "Question language",
+    "lang_vi": "Vietnamese",
+    "lang_en": "English",
+    "estimate": "Estimated: ~{n} questions",
+    "btn_generate": "Create Quiz →",
+    "progress_reading": "Reading documents...",
+    "progress_generating": "Generating questions...",
+    "progress_validating": "Checking quality...",
+    "progress_done": "Done!",
+    "no_file": "Please upload at least 1 file.",
+    "config_label": "Configuration"
+  },
+
+  "review": {
+    "tab": "Review & Edit",
+    "header": "{n} questions generated",
+    "btn_play": "Play Quiz",
+    "btn_export": "Download",
+    "filter_difficulty": "Filter by difficulty",
+    "filter_source": "Filter by source",
+    "search_placeholder": "Search questions...",
+    "all": "All",
+    "tag_easy": "Easy",
+    "tag_medium": "Medium",
+    "tag_hard": "Hard",
+    "btn_edit": "Edit",
+    "btn_regen": "Regenerate",
+    "btn_delete": "Delete",
+    "explanation_label": "Explanation",
+    "correct_answer": "Correct answer",
+    "no_mcq": "No questions yet. Create a quiz in the first tab.",
+    "save": "Save",
+    "cancel": "Cancel",
+    "regen_confirm": "Regenerate with difficulty:",
+    "deleted": "Question {n} deleted.",
+    "stats_easy": "Easy",
+    "stats_medium": "Medium",
+    "stats_hard": "Hard"
+  },
+
+  "export": {
+    "tab": "Download",
+    "title": "Choose export format",
+    "kahoot_name": "Kahoot",
+    "kahoot_desc": "Excel file for Kahoot import",
+    "quizizz_name": "Quizizz",
+    "quizizz_desc": "CSV file for Quizizz import",
+    "json_name": "JSON",
+    "json_desc": "Full metadata for research",
+    "btn_download": "Download {format}",
+    "guide_kahoot": "How to import to Kahoot:\n1. Go to create.kahoot.it\n2. Select Import → Spreadsheet\n3. Upload the downloaded file\n4. Review and Publish",
+    "guide_quizizz": "How to import to Quizizz:\n1. Go to quizizz.com → Create\n2. Select Import from file\n3. Upload the CSV file\n4. Review and Save"
+  },
+
+  "common": {
+    "loading": "Processing...",
+    "error": "An error occurred: {msg}",
+    "success": "Success!",
+    "question": "Question",
+    "answer_a": "A",
+    "answer_b": "B",
+    "answer_c": "C",
+    "answer_d": "D"
+  }
+}

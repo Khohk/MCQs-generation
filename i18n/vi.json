@@ -1,0 +1,83 @@
+{
+  "app_title": "AI MCQ Generator",
+  "app_subtitle": "Tạo câu hỏi trắc nghiệm từ tài liệu của bạn",
+  "lang_switch": "English",
+
+  "upload": {
+    "tab": "Tạo Quiz",
+    "drop_label": "Kéo file vào đây",
+    "drop_hint": "Hỗ trợ PDF, DOCX, PPTX",
+    "file_count": "{n} file · {p} trang",
+    "difficulty_label": "Độ khó",
+    "difficulty_easy": "Dễ",
+    "difficulty_medium": "Trung bình",
+    "difficulty_hard": "Khó",
+    "density_label": "Mật độ câu hỏi",
+    "density_low": "Ít",
+    "density_medium": "Vừa",
+    "density_high": "Nhiều",
+    "lang_label": "Ngôn ngữ câu hỏi",
+    "lang_vi": "Tiếng Việt",
+    "lang_en": "English",
+    "estimate": "Ước tính: ~{n} câu",
+    "btn_generate": "Tạo Quiz →",
+    "progress_reading": "Đang đọc tài liệu...",
+    "progress_generating": "Đang tạo câu hỏi...",
+    "progress_validating": "Đang kiểm tra chất lượng...",
+    "progress_done": "Hoàn tất!",
+    "no_file": "Vui lòng upload ít nhất 1 file.",
+    "config_label": "Cấu hình"
+  },
+
+  "review": {
+    "tab": "Review & Chỉnh sửa",
+    "header": "Đã tạo {n} câu hỏi",
+    "btn_play": "Chơi thử",
+    "btn_export": "Tải về",
+    "filter_difficulty": "Lọc theo độ khó",
+    "filter_source": "Lọc theo file",
+    "search_placeholder": "Tìm câu hỏi...",
+    "all": "Tất cả",
+    "tag_easy": "Dễ",
+    "tag_medium": "Trung bình",
+    "tag_hard": "Khó",
+    "btn_edit": "Sửa",
+    "btn_regen": "Sinh lại",
+    "btn_delete": "Xóa",
+    "explanation_label": "Giải thích",
+    "correct_answer": "Đáp án đúng",
+    "no_mcq": "Chưa có câu hỏi. Tạo quiz ở tab đầu tiên.",
+    "save": "Lưu",
+    "cancel": "Hủy",
+    "regen_confirm": "Sinh lại câu này với độ khó:",
+    "deleted": "Đã xóa câu {n}.",
+    "stats_easy": "Dễ",
+    "stats_medium": "Trung bình",
+    "stats_hard": "Khó"
+  },
+
+  "export": {
+    "tab": "Tải về",
+    "title": "Chọn định dạng xuất",
+    "kahoot_name": "Kahoot",
+    "kahoot_desc": "File Excel import vào Kahoot",
+    "quizizz_name": "Quizizz",
+    "quizizz_desc": "File CSV import vào Quizizz",
+    "json_name": "JSON",
+    "json_desc": "Dữ liệu đầy đủ cho nghiên cứu",
+    "btn_download": "Tải {format}",
+    "guide_kahoot": "Hướng dẫn import Kahoot:\n1. Vào create.kahoot.it\n2. Chọn Import → Spreadsheet\n3. Upload file vừa tải\n4. Kiểm tra và Publish",
+    "guide_quizizz": "Hướng dẫn import Quizizz:\n1. Vào quizizz.com → Create\n2. Chọn Import từ file\n3. Upload file CSV\n4. Review và Save"
+  },
+
+  "common": {
+    "loading": "Đang xử lý...",
+    "error": "Có lỗi xảy ra: {msg}",
+    "success": "Thành công!",
+    "question": "Câu",
+    "answer_a": "A",
+    "answer_b": "B",
+    "answer_c": "C",
+    "answer_d": "D"
+  }
+}

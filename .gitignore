@@ -25,8 +25,13 @@ uploads/
 *.xlsx
 *.csv
 
-# Kết quả sinh ra
-*.json
+# Kết quả sinh ra (chỉ bỏ qua JSON ở root và data/, không ảnh hưởng i18n/)
+data/*.json
+evaluation/*.json
+evaluation/results/*.json
+demo_results_*.json
+real_results_*.json
+checkpoint_*.json
 !demo_results_sample_mcqs.json
 
 # Evaluation output
