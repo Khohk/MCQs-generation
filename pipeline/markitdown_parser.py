@@ -4,7 +4,7 @@ pipeline/markitdown_parser.py
 Universal file parser: PDF / PPTX / DOCX / XLSX / Images → Markdown
 
 Uses : microsoft/markitdown
-Vision: Groq llama-3.2-11b-vision-preview (free, OpenAI-compat)
+Vision: Groq meta-llama/llama-4-scout-17b-16e-instruct (free, OpenAI-compat)
         → mô tả ảnh trong file khi GROQ_API_KEY có trong .env
         → nếu không có key thì bỏ qua ảnh, vẫn parse text bình thường
 
@@ -54,10 +54,10 @@ def _build_converter() -> MarkItDown:
                 base_url="https://api.groq.com/openai/v1",
                 api_key=groq_key,
             )
-            _log("[vision] GROQ_API_KEY found → dùng llama-3.2-11b-vision-preview")
+            _log("[vision] GROQ_API_KEY found → dùng meta-llama/llama-4-scout-17b-16e-instruct")
             return MarkItDown(
                 llm_client=llm_client,
-                llm_model="llama-3.2-11b-vision-preview",
+                llm_model="meta-llama/llama-4-scout-17b-16e-instruct",
             )
         except Exception as e:
             _log(f"[vision] Không khởi tạo được Groq client: {e} → text-only mode")
@@ -74,6 +74,11 @@ def _get_converter() -> MarkItDown:
     if _converter is None:
         _converter = _build_converter()
     return _converter
+
+def reset_converter():
+    """Force re-initialization of the converter (e.g. after env change)."""
+    global _converter
+    _converter = None
 
 
 # ── Main public API ─────────────────────────────────────────────────

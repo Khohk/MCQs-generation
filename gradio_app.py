@@ -438,9 +438,11 @@ def build_app():
                     # Left: file upload
                     with gr.Column(scale=3):
                         file_input = gr.File(
-                            label="Kéo file vào đây · PDF, DOCX, PPTX",
+                            label="Kéo file vào đây · PDF, PPTX, DOCX, XLSX, JPG, PNG",
                             file_count="multiple",
-                            file_types=[".pdf", ".docx", ".pptx"],
+                            file_types=[".pdf", ".pptx", ".docx",
+                                        ".xlsx", ".xls",
+                                        ".jpg", ".jpeg", ".png", ".webp"],
                             height=220,
                         )
                         file_info = gr.HTML("<p class='estimate-text'></p>")
