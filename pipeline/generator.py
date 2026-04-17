@@ -15,6 +15,8 @@ Features:
   OPENROUTER_API_KEY=...   (optional)
 """
 
+from __future__ import annotations
+
 import json
 import sys
 import time
@@ -26,7 +28,10 @@ from dotenv import load_dotenv
 # Đảm bảo project root trong sys.path khi chạy trực tiếp
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from prompts.mcq_prompt import build_prompt
+from prompts.mcq_prompt import (
+    build_prompt, build_summary_prompt,
+    build_hint_prompt, build_summary_chunk_prompt,
+)
 
 load_dotenv()
 
@@ -55,7 +60,8 @@ RETRY_LIMIT    = 2      # số lần retry trên cùng 1 provider trước khi c
 SWITCH_DELAY   = 2.0    # giây chờ khi switch provider
 REQUEST_DELAY  = 4.5    # giây giữa các request (safe với Gemini 15 RPM)
 
-CHECKPOINT_DIR = Path("data/checkpoints")
+CHECKPOINT_DIR  = Path("data/checkpoints")
+SUMMARY_CHUNK_ID = "__summary__"   # chunk_id dành riêng cho knowledge map
 
 
 # ── Provider state ─────────────────────────────────────────────────
@@ -127,10 +133,14 @@ def _mark_disabled(idx: int, reason: str):
 
 # ── Unified API call ───────────────────────────────────────────────
 
-def _call_provider(prompt: str, idx: int) -> str:
+def _call_provider(prompt: str, idx: int, json_mode: bool = True) -> str:
     """
     Gọi 1 provider và trả về raw text response.
     Raise exception nếu lỗi để caller xử lý.
+
+    Args:
+        json_mode: True  → ép response format JSON (dùng cho MCQ)
+                   False → plain text (dùng cho slide summary)
     """
     p = PROVIDERS[idx]
     provider = p["provider"]
@@ -138,41 +148,188 @@ def _call_provider(prompt: str, idx: int) -> str:
 
     if provider == "gemini":
         from google.genai import types
-        client   = _get_gemini_client()
+        client      = _get_gemini_client()
+        cfg_kwargs  = {"temperature": 0.7, "max_output_tokens": 2048}
+        if json_mode:
+            cfg_kwargs["response_mime_type"] = "application/json"
         response = client.models.generate_content(
             model=f"models/{model}",
             contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                temperature=0.7,
-                max_output_tokens=2048,
-            ),
+            config=types.GenerateContentConfig(**cfg_kwargs),
         )
         return response.text.strip()
 
     else:
         # Groq / Cerebras / OpenRouter — tất cả OpenAI-compatible
-        client   = _get_openai_compat_client(provider)
-        response = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            temperature=0.7,
-            max_tokens=2048,
-        )
+        client  = _get_openai_compat_client(provider)
+        kwargs  = {
+            "model"      : model,
+            "messages"   : [{"role": "user", "content": prompt}],
+            "temperature": 0.7,
+            "max_tokens" : 2048,
+        }
+        if json_mode:
+            kwargs["response_format"] = {"type": "json_object"}
+        response = client.chat.completions.create(**kwargs)
         return response.choices[0].message.content.strip()
+
+
+# ── Slide summary (knowledge map) ─────────────────────────────────
+
+def build_slide_summary(chunks: list[dict]) -> str:
+    """
+    Đọc tất cả chunks → sinh knowledge map dạng markdown.
+    Dùng provider fallback system giống MCQ generation.
+    Trả về "" nếu thất bại (graceful degradation).
+    """
+    global _current_provider_idx
+
+    prompt         = build_summary_prompt(chunks)
+    attempts_total = len(PROVIDERS) * RETRY_LIMIT
+
+    for attempt in range(attempts_total):
+        idx = _next_available_provider()
+
+        if idx is None:
+            active = [i for i in range(len(PROVIDERS)) if i not in _provider_disabled]
+            if not active:
+                break
+            wait = min(_provider_cooldown.get(i, 0) for i in active) - time.time()
+            time.sleep(max(wait, 1.0))
+            idx = _next_available_provider()
+            if idx is None:
+                break
+
+        _current_provider_idx = idx
+        p     = PROVIDERS[idx]
+        label = f"{p['provider']}/{p['model'].split('/')[-1]}"
+
+        try:
+            raw = _call_provider(prompt, idx, json_mode=False)
+            _log(f"  [slide_summary] OK [{label}] ({len(raw)} chars)")
+            return raw.strip()
+        except Exception as e:
+            err = str(e)
+            _log(f"  [slide_summary] attempt {attempt+1} [{label}]: {err[:80]}")
+            is_rate_limit = any(k in err for k in ("429", "RESOURCE_EXHAUSTED", "rate_limit", "RateLimitError"))
+            is_not_found  = any(k in err for k in ("404", "NOT_FOUND", "model_not_found", "does not exist"))
+            is_no_key     = "not found in .env" in err
+            if is_not_found or is_no_key:
+                _mark_disabled(idx, "model not found" if is_not_found else "no API key")
+            elif is_rate_limit:
+                _mark_cooldown(idx)
+            else:
+                time.sleep(5)
+                continue
+            next_idx = _next_available_provider()
+            if next_idx is not None and next_idx != idx:
+                _current_provider_idx = next_idx
+            time.sleep(SWITCH_DELAY)
+
+    _log("  [slide_summary] Failed — continuing without cross-chunk context")
+    return ""
+
+
+def build_chunk_hints(chunks: list[dict], slide_summary: str) -> dict[str, list[str]]:
+    """
+    1 API call → per-chunk connection hints dạng {chunk_id: [hint, ...]}.
+    Dùng provider fallback system. Trả về {} nếu thất bại.
+    """
+    global _current_provider_idx
+
+    prompt         = build_hint_prompt(chunks, slide_summary)
+    attempts_total = len(PROVIDERS) * RETRY_LIMIT
+
+    for attempt in range(attempts_total):
+        idx = _next_available_provider()
+
+        if idx is None:
+            active = [i for i in range(len(PROVIDERS)) if i not in _provider_disabled]
+            if not active:
+                break
+            wait = min(_provider_cooldown.get(i, 0) for i in active) - time.time()
+            time.sleep(max(wait, 1.0))
+            idx = _next_available_provider()
+            if idx is None:
+                break
+
+        _current_provider_idx = idx
+        p     = PROVIDERS[idx]
+        label = f"{p['provider']}/{p['model'].split('/')[-1]}"
+
+        try:
+            raw  = _call_provider(prompt, idx, json_mode=True)
+            data = json.loads(raw)
+            # Unwrap {"hints": {...}} hoặc dùng thẳng nếu là flat dict
+            hints = data.get("hints", data) if isinstance(data, dict) else {}
+            # Validate: mỗi value phải là list[str]
+            hints = {
+                k: [str(h) for h in v] if isinstance(v, list) else []
+                for k, v in hints.items()
+            }
+            total_hints = sum(len(v) for v in hints.values())
+            _log(f"  [chunk_hints] OK [{label}] — {total_hints} hints across {len(hints)} chunks")
+            return hints
+        except Exception as e:
+            err = str(e)
+            _log(f"  [chunk_hints] attempt {attempt+1} [{label}]: {err[:80]}")
+            is_rate_limit = any(k in err for k in ("429", "RESOURCE_EXHAUSTED", "rate_limit", "RateLimitError"))
+            is_not_found  = any(k in err for k in ("404", "NOT_FOUND", "model_not_found", "does not exist"))
+            is_no_key     = "not found in .env" in err
+            if is_not_found or is_no_key:
+                _mark_disabled(idx, "model not found" if is_not_found else "no API key")
+            elif is_rate_limit:
+                _mark_cooldown(idx)
+            else:
+                time.sleep(5)
+                continue
+            next_idx = _next_available_provider()
+            if next_idx is not None and next_idx != idx:
+                _current_provider_idx = next_idx
+            time.sleep(SWITCH_DELAY)
+
+    _log("  [chunk_hints] Failed — continuing without connection hints")
+    return {}
+
+
+def _make_summary_chunk(slide_summary: str) -> dict:
+    """Tạo synthetic chunk từ knowledge map để generate MCQ riêng."""
+    return {
+        "chunk_id" : SUMMARY_CHUNK_ID,
+        "topic"    : "Lecture Overview & Knowledge Connections",
+        "pages"    : "all",
+        "text"     : slide_summary,
+        "has_image": False,
+    }
 
 
 # ── Per-chunk generation ───────────────────────────────────────────
 
-def _generate_for_chunk(chunk: dict, n_questions: int, difficulty: str) -> list[dict]:
+def _generate_for_chunk(
+    chunk: dict,
+    n_questions: int,
+    difficulty: str,
+    slide_context: str = "",
+    chunk_hints: list[str] = None,
+    summary_chunk_prompt: str = "",
+) -> list[dict]:
     """
     Gọi API cho 1 chunk.
     Nếu provider hiện tại bị 429 → switch sang provider tiếp theo.
+
+    Args:
+        summary_chunk_prompt: nếu có, dùng thẳng prompt này thay vì build_prompt()
+                              (dành riêng cho summary chunk)
     """
     global _current_provider_idx
 
-    prompt   = build_prompt(chunk, n_questions=n_questions, difficulty=difficulty)
+    prompt = summary_chunk_prompt or build_prompt(
+        chunk,
+        n_questions=n_questions,
+        difficulty=difficulty,
+        slide_context=slide_context,
+        chunk_hints=chunk_hints or [],
+    )
     raw_text = ""
 
     # Thử lần lượt từng provider cho đến khi có kết quả
@@ -300,9 +457,17 @@ def get_checkpoint_info(file_name: str) -> dict | None:
     if not path.exists():
         return None
     try:
-        data  = json.loads(path.read_text(encoding="utf-8"))
-        total = sum(len(v) for v in data.values())
-        return {"chunks_done": len(data), "mcqs_so_far": total, "path": str(path)}
+        data        = json.loads(path.read_text(encoding="utf-8"))
+        chunk_data  = {k: v for k, v in data.items()
+                       if not k.startswith("__") and isinstance(v, list)}
+        total       = sum(len(v) for v in chunk_data.values())
+        has_summary = "__slide_summary__" in data
+        return {
+            "chunks_done" : len(chunk_data),
+            "mcqs_so_far" : total,
+            "has_summary" : has_summary,
+            "path"        : str(path),
+        }
     except Exception:
         return None
 
@@ -326,6 +491,11 @@ def generate_mcqs(
     """
     Sinh MCQ từ list chunks với multi-provider fallback + checkpoint.
 
+    Flow:
+      1. Build slide knowledge map (1 API call) → slide_summary
+      2. Tạo summary_chunk từ knowledge map → sinh MCQ tổng hợp riêng
+      3. Sinh MCQ từng chunk, inject slide_summary làm context
+
     Args:
         chunks      : output từ chunker.chunk_pages()
         n_per_chunk : số MCQ mỗi chunk
@@ -334,14 +504,47 @@ def generate_mcqs(
         on_progress : callback(idx, total, chunk_id, eta_sec, skipped)
 
     Returns:
-        List[MCQ dict] — tất cả MCQ từ mọi chunk, chưa validate
+        List[MCQ dict] — summary MCQs trước, rồi MCQ từng chunk, chưa validate
     """
     done_map = _load_checkpoint(pdf_name)
-    total    = len(chunks)
-    n_done   = len(done_map)
+
+    # ── Step 1: build or load slide summary ───────────────────────
+    if "__slide_summary__" in done_map:
+        slide_summary = done_map["__slide_summary__"]
+        _log(f"  [slide_summary] Loaded from checkpoint ({len(slide_summary)} chars)")
+    else:
+        _log(f"  [slide_summary] Building knowledge map ({len(chunks)} chunks)...")
+        slide_summary = build_slide_summary(chunks)
+        if slide_summary:
+            done_map["__slide_summary__"] = slide_summary
+            _save_checkpoint(pdf_name, done_map)
+
+    # ── Step 2: build or load per-chunk hints ─────────────────────
+    if "__chunk_hints__" in done_map:
+        hints_map = done_map["__chunk_hints__"]
+        _log(f"  [chunk_hints] Loaded from checkpoint")
+    elif slide_summary:
+        _log(f"  [chunk_hints] Building connection hints...")
+        hints_map = build_chunk_hints(chunks, slide_summary)
+        if hints_map:
+            done_map["__chunk_hints__"] = hints_map
+            _save_checkpoint(pdf_name, done_map)
+    else:
+        hints_map = {}
+
+    # ── Step 3: build processing list ─────────────────────────────
+    # summary_chunk đứng đầu (nếu có summary), rồi mới đến content chunks
+    processing_chunks = list(chunks)
+    if slide_summary:
+        processing_chunks = [_make_summary_chunk(slide_summary)] + processing_chunks
+
+    total  = len(processing_chunks)
+    # n_done đếm content chunks thuộc batch này (bỏ qua meta keys và chunks ngoài batch)
+    batch_ids = {c["chunk_id"] for c in processing_chunks}
+    n_done    = sum(1 for k in done_map if k in batch_ids)
 
     if n_done > 0:
-        _log(f"  Resume: {n_done}/{total} chunks da co trong checkpoint")
+        _log(f"  Resume: {n_done}/{len(chunks)} content chunks da co trong checkpoint")
 
     # In provider list đang active
     available = [p for p in PROVIDERS if os.getenv(
@@ -351,7 +554,8 @@ def generate_mcqs(
     labels = [p["provider"] + "/" + p["model"].split("/")[-1] for p in available]
     _log(f"  Active providers: {labels}")
 
-    for idx, chunk in enumerate(chunks):
+    # ── Step 4: generate MCQ từng chunk ───────────────────────────
+    for idx, chunk in enumerate(processing_chunks):
         chunk_id = chunk["chunk_id"]
 
         if chunk_id in done_map:
@@ -364,7 +568,20 @@ def generate_mcqs(
 
         _log(f"\n  [{idx+1}/{total}] {chunk_id} — {chunk['topic'][:45]}")
 
-        mcqs = _generate_for_chunk(chunk, n_per_chunk, difficulty)
+        if chunk_id == SUMMARY_CHUNK_ID:
+            # Summary chunk: dùng prompt chuyên biệt hỏi về cross-chunk relationships
+            mcqs = _generate_for_chunk(
+                chunk, n_per_chunk, difficulty,
+                summary_chunk_prompt=build_summary_chunk_prompt(
+                    slide_summary, hints_map, n_per_chunk, difficulty
+                ),
+            )
+        else:
+            mcqs = _generate_for_chunk(
+                chunk, n_per_chunk, difficulty,
+                slide_context=slide_summary,
+                chunk_hints=hints_map.get(chunk_id, []),
+            )
 
         done_map[chunk_id] = mcqs
         _save_checkpoint(pdf_name, done_map)
@@ -372,7 +589,10 @@ def generate_mcqs(
         if idx < total - 1:
             time.sleep(REQUEST_DELAY)
 
+    # ── Assemble: summary MCQs trước, rồi content chunks ──────────
     all_mcqs = []
+    if SUMMARY_CHUNK_ID in done_map:
+        all_mcqs.extend(done_map[SUMMARY_CHUNK_ID])
     for chunk in chunks:
         all_mcqs.extend(done_map.get(chunk["chunk_id"], []))
 
