@@ -142,6 +142,7 @@ def build_prompt(
     difficulty: str = "medium",
     slide_context: str = "",
     chunk_hints: list[str] = None,
+    language: str = "en",
 ) -> str:
     """
     Build full prompt string cho 1 chunk.
@@ -179,20 +180,27 @@ def build_prompt(
     context_section = ""
     if slide_context.strip() or chunk_hints:
         map_block  = f"\n{slide_context.strip()}\n" if slide_context.strip() else ""
-        hint_lines = "\n".join(f"  - {h}" for h in chunk_hints)
-        hint_block = (
-            f"\n### Connection hints for this chunk:\n"
-            f"Use these to generate cross-chunk questions where appropriate:\n"
-            f"{hint_lines}\n"
-        ) if chunk_hints else ""
+
+        if chunk_hints:
+            hint_lines = "\n".join(f"  - {h}" for h in chunk_hints)
+            hint_block = (
+                f"\n### REQUIRED: Cross-chunk connection\n"
+                f"You MUST generate at least 1 question that exploits one of these connections.\n"
+                f"That question must require knowing BOTH this chunk AND the connected chunk "
+                f"to answer correctly — a student who only studied this chunk should not be "
+                f"able to answer it from this chunk's content alone:\n"
+                f"{hint_lines}\n"
+                f"\nCRITICAL: NEVER mention chunk IDs (e.g. 'chunk_005', 'chunk_012') in the "
+                f"question stem or any answer option. Use the topic name instead "
+                f"(e.g. 'RACI framework', 'ETL process'). Chunk IDs are internal — students never see them.\n"
+            )
+        else:
+            hint_block = ""
 
         context_section = f"""
 ## LECTURE KNOWLEDGE MAP
 This chunk is part of a larger lecture. Here is the overall knowledge structure:
 {map_block}{hint_block}
-When relevant, generate questions that connect this chunk to the broader lecture.
-Do NOT force cross-chunk references — only when it adds genuine value.
-
 """
 
     prompt = f"""You are an expert educator creating multiple-choice questions (MCQs) for university students.
@@ -210,16 +218,19 @@ Chunk ID: {chunk['chunk_id']}
 Generate exactly {n_questions} MCQ(s) based ONLY on the content above.{image_instruction}
 - Each question must test a DIFFERENT concept or aspect — no two questions may be paraphrases of each other.
 - If the content only supports fewer distinct concepts than {n_questions}, test different cognitive angles (definition vs application vs implication).
+- Write ALL questions and answers in {"Vietnamese (Tiếng Việt)" if language == "vi" else "English"}. Do NOT mix languages.
 
 ## DIFFICULTY & BLOOM'S TAXONOMY
 - Difficulty level: {difficulty.upper()}
 - Target Bloom's levels: {bloom_desc}
 - Questions must test concepts at the specified cognitive level, not just surface recall.
+- Cross-chunk questions are NOT automatically "hard". A cross-chunk question can be "medium" if the connection is direct and the student is expected to know both topics. Match difficulty to cognitive load, not to question type.
 
 ## DISTRACTOR QUALITY RULES (CRITICAL)
 Each wrong answer (distractor) must:
 1. Be the SAME TYPE as the correct answer (e.g., if answer is an algorithm name, all distractors are algorithm names)
-2. Be PLAUSIBLE — a student who hasn't studied might choose it
+2. Be PLAUSIBLE — a student who HAS studied the material but hasn't mastered this specific distinction might choose it. "Hasn't studied" is NOT the bar — set the bar higher.
+3. For cross-chunk comparison questions: each distractor must represent a specific, believable misconception about one of the concepts being compared — NOT just a label for another architecture/concept. A student who knows concept A but misunderstands how it differs from concept B should find the distractor tempting.
 4. NOT be "All of the above" / "None of the above" / "Both A and B"
 5. Be similar in length and grammatical structure to the correct answer
 6. Be COMPLETELY DIFFERENT from the correct answer — never copy, paraphrase, or repeat the correct answer text
@@ -234,7 +245,7 @@ Each wrong answer (distractor) must:
 - "difficulty" must be one of: easy, medium, hard
 - "source_chunk" must be: {chunk['chunk_id']}
 - Distribute correct answers: A, B, C, D must each appear at least once across all questions. Target ~25% each. NEVER put more than 40% of answers as the same letter.
-- Write questions and answers in English
+- Write questions and answers in {"Vietnamese (Tiếng Việt)" if language == "vi" else "English"}
 - Keep explanation concise (1-2 sentences), referencing the source content
 
 ## EXAMPLE
@@ -250,6 +261,7 @@ def build_summary_chunk_prompt(
     hints_map: dict[str, list[str]],
     n_questions: int = 3,
     difficulty: str = "medium",
+    language: str = "en",
 ) -> str:
     """
     Prompt chuyên biệt cho summary_chunk.
@@ -308,7 +320,7 @@ Each wrong answer must:
 - "bloom_level" must be one of: remember, understand, apply, analyze, evaluate, create
 - "difficulty" must be one of: easy, medium, hard
 - "source_chunk" must be: __summary__
-- Write questions and answers in English
+- Write questions and answers in {"Vietnamese (Tiếng Việt)" if language == "vi" else "English"}
 - Explanation must reference at least 2 chunk topics
 
 ## EXAMPLE

@@ -101,6 +101,8 @@ def run_pipeline(files, difficulty_label, density_label, q_lang_label, lang,
     except Exception as e:
         return None, f"Loi parse file: {e}"
 
+    _log_parse(all_pages, files)
+
     # Step 2: Chunk
     step(0.3, "Dang phan tich cau truc...")
     try:
@@ -109,17 +111,22 @@ def run_pipeline(files, difficulty_label, density_label, q_lang_label, lang,
     except Exception as e:
         return None, f"Loi chunking: {e}"
 
+    _log_chunks(chunks)
+
     # Step 3: Generate
     step(0.5, f"Dang tao cau hoi tu {len(chunks)} chu de...")
     try:
-        from pipeline.generator import generate_mcqs
+        from pipeline.generator import generate_mcqs, get_provider_stats, reset_provider_stats
         pdf_name = Path(files[0].name).stem if files else "upload"
+        reset_provider_stats()
         raw_mcqs = generate_mcqs(
             chunks,
             n_per_chunk=n_per_chunk,
             difficulty=difficulty,
             pdf_name=pdf_name,
+            language=LANG_MAP.get(q_lang_label, "en"),
         )
+        _log_provider_stats(get_provider_stats(), pdf_name)
     except Exception as e:
         return None, f"Loi generate: {e}"
 
@@ -127,12 +134,74 @@ def run_pipeline(files, difficulty_label, density_label, q_lang_label, lang,
     step(0.9, "Dang kiem tra chat luong...")
     try:
         from pipeline.validator import validate_mcqs
-        valid, _ = validate_mcqs(raw_mcqs)
+        valid, rejected = validate_mcqs(raw_mcqs)
+        if rejected:
+            _log_rejected(rejected, pdf_name)
     except Exception as e:
         return None, f"Loi validate: {e}"
 
     step(1.0, f"Hoan tat! {len(valid)} cau hoi da san sang.")
     return json.dumps(valid, ensure_ascii=False), None
+
+
+def _log_provider_stats(stats: dict, pdf_name: str):
+    import json, datetime
+    log_dir = Path("data/provider_logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "provider_usage.jsonl"
+    entry = {
+        "ts"            : datetime.datetime.now().isoformat(),
+        "file"          : pdf_name,
+        "providers"     : stats.get("providers", []),
+        "chunks_skipped": stats.get("chunks_skipped", []),
+    }
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def _log_parse(pages: list, files) -> None:
+    import datetime
+    log_dir = Path("data/dev_logs"); log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "parse_chunks.log"
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(f"\n{'='*60}\n")
+        f.write(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] PARSE\n")
+        f.write(f"Files: {[Path(x.name).name for x in files]}\n")
+        f.write(f"Total pages kept: {len(pages)}\n")
+        f.write(f"{'─'*60}\n")
+        f.write(f"{'PAGE':<6} {'TITLE':<42} {'CHARS'}\n")
+        for p in pages:
+            f.write(f"{p['page_num']:<6} {p['title'][:40]:<42} {p['char_count']}\n")
+
+
+def _log_chunks(chunks: list) -> None:
+    import datetime
+    log_dir = Path("data/dev_logs"); log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "parse_chunks.log"
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(f"\n[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] CHUNKS → {len(chunks)} total\n")
+        f.write(f"{'─'*60}\n")
+        f.write(f"{'ID':<12} {'TOPIC':<35} {'PAGES':<16} {'CHARS'}\n")
+        for c in chunks:
+            pages_str = str(c['pages']) if len(c['pages']) <= 4 else f"[{c['pages'][0]}..{c['pages'][-1]}]({len(c['pages'])}p)"
+            f.write(f"{c['chunk_id']:<12} {c['topic'][:33]:<35} {pages_str:<16} {len(c['text'])}\n")
+        avg = sum(len(c['text']) for c in chunks) / len(chunks) if chunks else 0
+        f.write(f"{'─'*60}\n")
+        f.write(f"Avg chars/chunk: {avg:.0f}\n")
+        f.write(f"{'='*60}\n")
+
+
+def _log_rejected(rejected: list, pdf_name: str):
+    import json, datetime
+    log_dir = Path("data/validation_logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / f"rejected_{pdf_name}.jsonl"
+    timestamp = datetime.datetime.now().isoformat()
+    with open(log_path, "a", encoding="utf-8") as f:
+        for r in rejected:
+            f.write(json.dumps({"ts": timestamp, "reason": r["reason"],
+                                "question": r["mcq"].get("question", "")[:80]},
+                               ensure_ascii=False) + "\n")
 
 
 # ── MCQ card HTML ─────────────────────────────────────────────────
@@ -243,6 +312,20 @@ def get_stats_html(mcqs_json: str, lang: str) -> str:
         <span style="background:#E74C3C;color:white;padding:3px 10px;
                      border-radius:8px;font-size:12px;">Khó: {hard}</span>
     </div>"""
+
+
+# ── Google Forms status helper ────────────────────────────────────
+
+def _gforms_status_html() -> str:
+    try:
+        from pipeline.google_forms_exporter import is_authenticated, has_credentials_file
+        if not has_credentials_file():
+            return "<span style='color:#F39C12'>⚠ Thiếu credentials.json</span>"
+        if is_authenticated():
+            return "<span style='color:#27AE60'>🟢 Đã kết nối Google</span>"
+    except ImportError:
+        return "<span style='color:#E74C3C'>🔴 Chưa cài thư viện Google</span>"
+    return "<span style='color:#888'>🔴 Chưa kết nối</span>"
 
 
 # ── Export helpers ─────────────────────────────────────────────────
@@ -573,6 +656,24 @@ def build_app():
                         json_btn  = gr.Button("Tải JSON", variant="secondary")
                         json_file = gr.File(label="", visible=False)
 
+                    with gr.Column():
+                        gr.Markdown("#### 📝 Google Forms\nTạo form với auto-grading")
+                        gforms_status = gr.HTML(_gforms_status_html())
+                        gforms_connect_btn = gr.Button(
+                            "Kết nối Google", variant="secondary", size="sm"
+                        )
+                        gforms_title = gr.Textbox(
+                            label="Tên form",
+                            value="MCQ Quiz",
+                            max_lines=1,
+                        )
+                        gforms_btn = gr.Button("Tạo Google Form", variant="primary")
+                        gr.Markdown(
+                            "> Chỉ chạy được **local**. "
+                            "Cần file `credentials.json` từ Google Cloud Console "
+                            "(OAuth 2.0 → Desktop app)."
+                        )
+
         # ── Event handlers ────────────────────────────────────────
 
         # Estimate khi đổi file hoặc density
@@ -670,11 +771,64 @@ def build_app():
         json_btn.click(on_export_json,
                        inputs=[mcqs_state], outputs=[json_file])
 
+        # Google Forms
+        def on_gforms_connect():
+            try:
+                from pipeline.google_forms_exporter import authenticate
+                success, msg = authenticate()
+                status = (
+                    "<span style='color:#27AE60'>🟢 Đã kết nối Google</span>"
+                    if success else
+                    f"<span style='color:#E74C3C'>🔴 {msg}</span>"
+                )
+                return status
+            except ImportError:
+                return "<span style='color:#E74C3C'>🔴 Chưa cài: pip install google-api-python-client google-auth-oauthlib</span>"
+
+        def on_gforms_export(mcqs_json, title):
+            if not mcqs_json:
+                return "<span style='color:#F39C12'>⚠ Chưa có MCQ. Tạo quiz trước.</span>"
+            try:
+                from pipeline.google_forms_exporter import export_to_google_forms
+                mcqs = json.loads(mcqs_json)
+                success, result = export_to_google_forms(mcqs, title=title or "MCQ Quiz")
+                if success:
+                    return (
+                        f"<span style='color:#27AE60'>🟢 Tạo form thành công!</span>"
+                        f"<a href='{result}' target='_blank' "
+                        f"style='display:block;padding:10px 14px;margin-top:8px;"
+                        f"background:#1a4731;border:1.5px solid #27AE60;border-radius:8px;"
+                        f"color:#6ee7b7;font-size:13px;text-decoration:none;'>"
+                        f"🔗 Mở Google Form →</a>"
+                        f"<p style='font-size:11px;color:#888;margin:4px 0 0;word-break:break-all'>{result}</p>"
+                    )
+                return f"<span style='color:#E74C3C'>🔴 {result}</span>"
+            except Exception as e:
+                return (
+                    f"<span style='color:#E74C3C'>🔴 Lỗi: {e}</span>",
+                    gr.update(visible=False),
+                )
+
+        gforms_connect_btn.click(
+            on_gforms_connect,
+            outputs=[gforms_status],
+        )
+        gforms_btn.click(
+            on_gforms_export,
+            inputs=[mcqs_state, gforms_title],
+            outputs=[gforms_status],
+        )
+
         # ── Quiz Player events ────────────────────────────────────
         def start_quiz(mcqs_json):
             if not mcqs_json:
-                return (gr.update(), gr.update(visible=False),
-                        gr.update(visible=False), 0, {})
+                return (
+                    gr.update(visible=False), gr.update(visible=False),
+                    "<p style='color:#888;padding:20px'>Chưa có câu hỏi. Tạo quiz trước.</p>",
+                    gr.update(choices=["A","B","C","D"], value=None),
+                    "", gr.update(visible=False), gr.update(visible=False),
+                    gr.update(visible=False), 0, {},
+                )
             labels = get_option_labels(mcqs_json, 0)
             q_html, idx, total, show_prev, show_next = render_quiz_question(mcqs_json, 0)
             show_finish = gr.update(visible=(total == 1))

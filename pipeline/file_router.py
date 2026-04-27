@@ -5,7 +5,7 @@ Router trung tâm: nhận bất kỳ file nào → trả về List[page_dict]
 cùng schema với pdf_parser để chunker/generator không cần sửa gì.
 
 Supported formats:
-  .pdf   → pdf_parser.py   (PyMuPDF + pdfplumber)
+  .pdf   → pdf_parser.py   (pymupdf4llm — LLM-optimized Markdown)
   .docx  → docx_parser.py  (python-docx)
   .pptx  → pptx_parser.py  (python-pptx)
 
@@ -18,7 +18,7 @@ Usage:
 
 from pathlib import Path
 
-# .pdf → pdf_parser (PyMuPDF, tốt nhất cho PDF)
+# .pdf → pdf_parser (pymupdf4llm, LLM-optimized Markdown)
 # các format còn lại → markitdown_parser
 SUPPORTED_EXTENSIONS = {
     ".pdf",
@@ -39,7 +39,7 @@ def parse_file(file_path: str, **kwargs) -> list[dict]:
     Auto-detect file type và gọi đúng parser.
 
     Routing:
-      .pdf              → pdf_parser.py  (PyMuPDF + pdfplumber)
+      .pdf              → pdf_parser.py  (pymupdf4llm)
       .pptx/.docx/.xlsx → markitdown_parser.py
       images            → markitdown_parser.py (vision)
 

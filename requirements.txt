@@ -7,8 +7,15 @@ python-docx>=1.1.0       # DOCX parser
 python-pptx>=0.6.23      # PPTX parser
 
 # ─── PDF Parsing ───────────────────────────────────────────────
-pymupdf>=1.25.4          # fitz: fast text + font metadata extraction
-pdfplumber>=0.11.0       # layout-aware extraction (fallback / tables)
+pymupdf4llm>=0.0.17      # LLM-optimized Markdown from PDF (wraps pymupdf)
+pymupdf>=1.25.4          # fitz: metadata extraction (dep of pymupdf4llm)
+pdfplumber>=0.11.0       # fallback extraction cho garbled font
+pytesseract>=0.3.10      # OCR fallback cho scanned PDF (cần cài Tesseract binary)
+
+# ─── Google Forms Export ───────────────────────────────────────
+google-api-python-client>=2.100.0  # Forms API + Drive API
+google-auth-oauthlib>=1.2.0        # OAuth2 installed app flow
+google-auth-httplib2>=0.2.0        # HTTP transport for google-auth
 
 # ─── Gemini API ────────────────────────────────────────────────
 google-genai>=1.0.0      # NEW unified SDK (google-generativeai đã deprecated Nov 2025)

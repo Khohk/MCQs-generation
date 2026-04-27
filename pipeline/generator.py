@@ -32,6 +32,8 @@ from prompts.mcq_prompt import (
     build_prompt, build_summary_prompt,
     build_hint_prompt, build_summary_chunk_prompt,
 )
+from pipeline.schemas import MCQItem
+from pydantic import ValidationError
 
 load_dotenv()
 
@@ -69,6 +71,12 @@ _current_provider_idx = 0
 _provider_cooldown: dict[int, float] = {}   # idx → thời điểm có thể dùng lại
 _provider_disabled: set[int] = set()        # idx → disabled vĩnh viễn (404/no key)
 COOLDOWN_SECONDS = 60.0
+
+# ── Provider usage tracking ────────────────────────────────────────
+_provider_call_counts: dict[int, int] = {}      # idx → số lần gọi thành công
+_provider_tokens: dict[int, int] = {}           # idx → tổng token (prompt + completion)
+_provider_response_times: dict[int, list] = {}  # idx → list[float] latency mỗi call (giây)
+_session_chunks_skipped: list = []              # chunk_id bị skip (0 MCQ sau hết attempts)
 
 
 # ── Client factory ─────────────────────────────────────────────────
@@ -146,18 +154,22 @@ def _call_provider(prompt: str, idx: int, json_mode: bool = True) -> str:
     provider = p["provider"]
     model    = p["model"]
 
+    t0 = time.time()
+
     if provider == "gemini":
         from google.genai import types
-        client      = _get_gemini_client()
-        cfg_kwargs  = {"temperature": 0.7, "max_output_tokens": 2048}
+        client     = _get_gemini_client()
+        cfg_kwargs = {"temperature": 0.7, "max_output_tokens": 2048}
         if json_mode:
             cfg_kwargs["response_mime_type"] = "application/json"
+            cfg_kwargs["response_schema"]    = list[MCQItem]  # enforce schema ở phía model
         response = client.models.generate_content(
             model=f"models/{model}",
             contents=prompt,
             config=types.GenerateContentConfig(**cfg_kwargs),
         )
-        return response.text.strip()
+        text   = response.text.strip()
+        tokens = getattr(response.usage_metadata, "total_token_count", 0) or 0
 
     else:
         # Groq / Cerebras / OpenRouter — tất cả OpenAI-compatible
@@ -171,7 +183,43 @@ def _call_provider(prompt: str, idx: int, json_mode: bool = True) -> str:
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
         response = client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content.strip()
+        text   = response.choices[0].message.content.strip()
+        usage  = getattr(response, "usage", None)
+        tokens = getattr(usage, "total_tokens", 0) or 0
+
+    elapsed = round(time.time() - t0, 2)
+    _provider_call_counts[idx] = _provider_call_counts.get(idx, 0) + 1
+    _provider_tokens[idx]      = _provider_tokens.get(idx, 0) + tokens
+    _provider_response_times.setdefault(idx, []).append(elapsed)
+    return text
+
+
+def get_provider_stats() -> dict:
+    """Trả về stats đầy đủ của session: per-provider + chunks skipped."""
+    providers = []
+    for idx, count in _provider_call_counts.items():
+        p      = PROVIDERS[idx]
+        times  = _provider_response_times.get(idx, [])
+        avg_ms = round(sum(times) / len(times) * 1000) if times else 0
+        providers.append({
+            "provider"    : p["provider"],
+            "model"       : p["model"],
+            "calls"       : count,
+            "tokens"      : _provider_tokens.get(idx, 0),
+            "avg_latency_ms": avg_ms,
+            "disabled"    : idx in _provider_disabled,
+        })
+    return {
+        "providers"     : sorted(providers, key=lambda x: -x["calls"]),
+        "chunks_skipped": list(_session_chunks_skipped),
+    }
+
+
+def reset_provider_stats():
+    _provider_call_counts.clear()
+    _provider_tokens.clear()
+    _provider_response_times.clear()
+    _session_chunks_skipped.clear()
 
 
 # ── Slide summary (knowledge map) ─────────────────────────────────
@@ -312,6 +360,7 @@ def _generate_for_chunk(
     slide_context: str = "",
     chunk_hints: list[str] = None,
     summary_chunk_prompt: str = "",
+    language: str = "en",
 ) -> list[dict]:
     """
     Gọi API cho 1 chunk.
@@ -329,6 +378,7 @@ def _generate_for_chunk(
         difficulty=difficulty,
         slide_context=slide_context,
         chunk_hints=chunk_hints or [],
+        language=language,
     )
     raw_text = ""
 
@@ -399,6 +449,7 @@ def _generate_for_chunk(
             time.sleep(SWITCH_DELAY)
 
     _log(f"    SKIP {chunk['chunk_id']} sau {attempts_total} attempts")
+    _session_chunks_skipped.append(chunk["chunk_id"])
     return []
 
 
@@ -419,9 +470,15 @@ def _parse_response(raw: str, chunk_id: str) -> list[dict]:
         else:
             data = [data]
 
-    for mcq in data:
-        mcq["source_chunk"] = chunk_id
-    return data
+    validated = []
+    for item in data:
+        item["source_chunk"] = chunk_id
+        try:
+            validated.append(MCQItem.model_validate(item).model_dump())
+        except ValidationError as e:
+            _log(f"    [pydantic] skip 1 MCQ — {e.error_count()} lỗi: "
+                 f"{[err['loc'] for err in e.errors()]}")
+    return validated
 
 
 # ── Checkpoint helpers ─────────────────────────────────────────────
@@ -486,6 +543,7 @@ def generate_mcqs(
     n_per_chunk: int = 2,
     difficulty: str = "medium",
     pdf_name: str = "unknown",
+    language: str = "en",
     on_progress=None,   # callback(idx, total, chunk_id, eta_seconds, skipped)
 ) -> list[dict]:
     """
@@ -533,13 +591,24 @@ def generate_mcqs(
         hints_map = {}
 
     # ── Step 3: build processing list ─────────────────────────────
-    # summary_chunk đứng đầu (nếu có summary), rồi mới đến content chunks
-    processing_chunks = list(chunks)
+    # Chỉ sinh MCQ từ conceptual chunks; bỏ stub/structural/instructional
+    conceptual_chunks = [c for c in chunks if c.get("chunk_type", "conceptual") == "conceptual"]
+    skipped_types = len(chunks) - len(conceptual_chunks)
+    if skipped_types:
+        type_summary = {}
+        for c in chunks:
+            ct = c.get("chunk_type", "?")
+            if ct != "conceptual":
+                type_summary[ct] = type_summary.get(ct, 0) + 1
+        _log(f"  [filter] skip {skipped_types} non-conceptual chunks: {type_summary}")
+
+    # summary_chunk đứng đầu (nếu có summary), rồi mới đến conceptual chunks
+    processing_chunks = list(conceptual_chunks)
     if slide_summary:
         processing_chunks = [_make_summary_chunk(slide_summary)] + processing_chunks
 
     total  = len(processing_chunks)
-    # n_done đếm content chunks thuộc batch này (bỏ qua meta keys và chunks ngoài batch)
+    # n_done đếm conceptual chunks đã có trong checkpoint
     batch_ids = {c["chunk_id"] for c in processing_chunks}
     n_done    = sum(1 for k in done_map if k in batch_ids)
 
@@ -569,18 +638,19 @@ def generate_mcqs(
         _log(f"\n  [{idx+1}/{total}] {chunk_id} — {chunk['topic'][:45]}")
 
         if chunk_id == SUMMARY_CHUNK_ID:
-            # Summary chunk: dùng prompt chuyên biệt hỏi về cross-chunk relationships
             mcqs = _generate_for_chunk(
                 chunk, n_per_chunk, difficulty,
                 summary_chunk_prompt=build_summary_chunk_prompt(
-                    slide_summary, hints_map, n_per_chunk, difficulty
+                    slide_summary, hints_map, n_per_chunk, difficulty, language
                 ),
+                language=language,
             )
         else:
             mcqs = _generate_for_chunk(
                 chunk, n_per_chunk, difficulty,
                 slide_context=slide_summary,
                 chunk_hints=hints_map.get(chunk_id, []),
+                language=language,
             )
 
         done_map[chunk_id] = mcqs
@@ -589,11 +659,11 @@ def generate_mcqs(
         if idx < total - 1:
             time.sleep(REQUEST_DELAY)
 
-    # ── Assemble: summary MCQs trước, rồi content chunks ──────────
+    # ── Assemble: summary MCQs trước, rồi conceptual chunks ───────
     all_mcqs = []
     if SUMMARY_CHUNK_ID in done_map:
         all_mcqs.extend(done_map[SUMMARY_CHUNK_ID])
-    for chunk in chunks:
+    for chunk in conceptual_chunks:
         all_mcqs.extend(done_map.get(chunk["chunk_id"], []))
 
     _log(f"\nTotal MCQs generated: {len(all_mcqs)}")
