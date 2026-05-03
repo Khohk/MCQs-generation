@@ -170,6 +170,8 @@ Evaluate this MCQ against the source text using the rubric."""
 
     return {
         "chunk_id"   : mcq.get("source_chunk", ""),
+        "bloom_level": mcq.get("bloom_level", ""),
+        "difficulty" : mcq.get("difficulty", ""),
         "question"   : mcq.get("question", "")[:80],
         "scores"     : scores,
         "reasoning"  : data.get("reasoning", {}),
@@ -311,7 +313,8 @@ if __name__ == "__main__":
     parser.add_argument("file",        nargs="?", help="File slide (PDF/PPTX/DOCX/...)")
     parser.add_argument("--mcq",       help="Path tới MCQ JSON (bỏ qua generate)")
     parser.add_argument("--chunks",    help="Path tới chunks JSON (dùng kèm --mcq)")
-    parser.add_argument("--n",         type=int, default=2,      help="MCQ per chunk (default: 2)")
+    parser.add_argument("--density",   default="Vừa",
+                        help="Bloom density: Ít|Vừa|Nhiều (default: Vừa)")
     parser.add_argument("--difficulty",default="medium",          help="easy|medium|hard")
     parser.add_argument("--out", default=None,
                         help="Path output (default: evaluation/results/<file>_<model>_<timestamp>.json)")
@@ -319,7 +322,6 @@ if __name__ == "__main__":
 
     # ── Load MCQs + chunks ──────────────────────────────────────────
     if args.mcq and args.chunks:
-        # Load từ file JSON có sẵn
         with open(args.mcq, encoding="utf-8") as f:
             mcqs = json.load(f)
         with open(args.chunks, encoding="utf-8") as f:
@@ -327,21 +329,25 @@ if __name__ == "__main__":
         _log(f"Loaded {len(mcqs)} MCQs, {len(chunks)} chunks từ file")
 
     elif args.file:
-        # Generate từ đầu
         from pipeline.file_router import parse_file
         from pipeline.chunker import chunk_pages
+        from pipeline.document_analyzer import analyze_document, select_chunk_strategy
         from pipeline.generator import generate_mcqs
         from pipeline.validator import validate_mcqs
+        from prompts.bloom_definitions import DENSITY_TO_LEVELS
 
         _log(f"\nParsing {args.file}...")
-        pages  = parse_file(args.file)
-        chunks = chunk_pages(pages)
-        _log(f"  {len(pages)} pages → {len(chunks)} chunks")
+        pages    = parse_file(args.file)
+        analysis = analyze_document(pages)
+        strategy = analysis["chunk_strategy"]
+        chunks   = chunk_pages(pages, strategy=strategy)
+        _log(f"  {len(pages)} pages → {len(chunks)} chunks  [strategy={strategy}]")
 
-        _log(f"\nGenerating MCQs ({args.n}/chunk, {args.difficulty})...")
+        bloom_levels = DENSITY_TO_LEVELS.get(args.density, DENSITY_TO_LEVELS["Vừa"])
+        _log(f"\nGenerating MCQs (PS4 | levels={bloom_levels} | {args.difficulty})...")
         raw_mcqs = generate_mcqs(
             chunks,
-            n_per_chunk=args.n,
+            bloom_levels=bloom_levels,
             difficulty=args.difficulty,
             pdf_name=Path(args.file).name,
         )

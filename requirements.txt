@@ -26,6 +26,7 @@ streamlit>=1.43.0
 # ─── Export ────────────────────────────────────────────────────
 openpyxl>=3.1.0          # Kahoot Excel export
 pandas>=2.2.0            # Quizizz CSV + data manipulation
+pydantic>=2.0.0          # MCQ/KU schema validation
 
 # ─── Evaluation Framework ──────────────────────────────────────
 openai>=1.0.0            # LLM-as-a-judge (GPT-4 for evaluating MCQs)

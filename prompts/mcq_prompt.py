@@ -329,6 +329,77 @@ Each wrong answer must:
 ## GENERATE {n_questions} MCQ(s) NOW:"""
 
 
+def build_whole_doc_prompt(
+    chunk: dict,
+    n_questions: int = 10,
+    difficulty: str = "medium",
+    language: str = "en",
+) -> str:
+    """
+    Prompt cho whole_doc mode — toàn bộ document trong 1 chunk.
+    Không cần slide_context hay chunk_hints vì model đã thấy đủ ngữ cảnh.
+    Yêu cầu model phân bổ câu hỏi đều giữa các section.
+    """
+    bloom_levels = BLOOM_BY_DIFFICULTY.get(difficulty, ["understand", "apply"])
+    bloom_desc   = " / ".join(
+        f"{lvl} ({BLOOM_DESCRIPTIONS[lvl]})" for lvl in bloom_levels
+    )
+    clean_text = _clean_chunk_text(chunk["text"])
+    lang       = "Vietnamese (Tiếng Việt)" if language == "vi" else "English"
+    n_pages    = len(chunk.get("pages", []))
+    # Yêu cầu cover ít nhất N section khác nhau
+    min_sections = min(n_questions, max(3, n_pages // 3))
+
+    return f"""You are an expert educator creating multiple-choice questions (MCQs) for university students.
+
+## SOURCE CONTENT
+Document: {chunk['topic']}
+Sections: {n_pages} pages/sections
+Chunk ID: {chunk['chunk_id']}
+
+--- BEGIN DOCUMENT ---
+{clean_text}
+--- END DOCUMENT ---
+
+## YOUR TASK
+Generate exactly {n_questions} MCQ(s) based ONLY on the content above.
+- SPREAD questions across the whole document — do NOT focus on the beginning.
+- Each [Section Title] marker is a different topic area. Cover at least {min_sections} distinct sections.
+- Each question must test a DIFFERENT concept — no two questions may be paraphrases.
+- Include both within-section questions AND at least 1 question that connects ideas across sections.
+- Write ALL questions and answers in {lang}. Do NOT mix languages.
+
+## DIFFICULTY & BLOOM'S TAXONOMY
+- Difficulty level: {difficulty.upper()}
+- Target Bloom's levels: {bloom_desc}
+- Mix cognitive levels across the {n_questions} questions.
+
+## DISTRACTOR QUALITY RULES (CRITICAL)
+Each wrong answer must:
+1. Be the SAME TYPE as the correct answer
+2. Be PLAUSIBLE — a student who studied but hasn't mastered the distinction might pick it
+3. NOT be "All of the above" / "None of the above" / "Both A and B"
+4. Be similar in length and grammatical structure to the correct answer
+5. Be COMPLETELY DIFFERENT from the correct answer — never copy or paraphrase it
+6. ALL FOUR options A, B, C, D must have unique text
+
+## OUTPUT FORMAT RULES
+- Return ONLY a valid JSON array, no markdown, no extra text
+- Each MCQ must have exactly these 10 fields:
+  question, A, B, C, D, answer, explanation, bloom_level, difficulty, source_chunk
+- "answer" must be exactly one of: A, B, C, D
+- "bloom_level" must be one of: remember, understand, apply, analyze, evaluate, create
+- "difficulty" must be one of: easy, medium, hard
+- "source_chunk" must be: {chunk['chunk_id']}
+- Distribute correct answers: A, B, C, D must each appear at least once. Max 40% same letter.
+- Keep explanation concise (1-2 sentences), citing the relevant section
+
+## EXAMPLE
+{FEW_SHOT_EXAMPLE}
+
+## GENERATE {n_questions} MCQ(s) NOW:"""
+
+
 def build_batch_prompt(
     chunks: list[dict],
     n_per_chunk: int = 3,

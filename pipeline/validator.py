@@ -1,47 +1,60 @@
 """
 pipeline/validator.py
 ---------------------
-List[MCQ raw] → (List[MCQ valid], List[{mcq, reason}])
+List[MCQ raw] -> (List[MCQ valid], List[{mcq, reason, layer}])
 
-Kiểm tra schema, field values, và loại duplicate.
+Two-layer validation:
+  Layer 1: schema validity
+  Layer 2: formal/content-shape quality checks
+
+The module keeps the old public API, while adding a lightweight quality_score
+for experiments and UI statistics.
 """
 
-# ── Whitelists ─────────────────────────────────────────────────────
-VALID_ANSWERS     = {"A", "B", "C", "D"}
-VALID_BLOOM       = {"remember", "understand", "apply", "analyze", "evaluate", "create"}
-VALID_DIFFICULTY  = {"easy", "medium", "hard"}
-REQUIRED_FIELDS   = {"question", "A", "B", "C", "D", "answer",
-                     "explanation", "bloom_level", "difficulty", "source_chunk"}
-MIN_QUESTION_LEN  = 10
+from __future__ import annotations
 
-# Bloom levels hợp lệ cho từng difficulty
-# Dựa trên Bloom's Taxonomy: easy=lower order, hard=higher order
+
+VALID_ANSWERS = {"A", "B", "C", "D"}
+VALID_BLOOM = {"remember", "understand", "apply", "analyze", "evaluate", "create"}
+VALID_DIFFICULTY = {"easy", "medium", "hard"}
+REQUIRED_FIELDS = {
+    "question", "A", "B", "C", "D", "answer",
+    "explanation", "bloom_level", "difficulty", "source_chunk",
+}
+MIN_QUESTION_LEN = 10
+
 BLOOM_BY_DIFFICULTY = {
-    "easy":   {"remember", "understand"},
+    "easy": {"remember", "understand"},
     "medium": {"apply", "analyze"},
-    "hard":   {"evaluate", "create"},
+    "hard": {"evaluate", "create"},
 }
 
 
-# ── Main function ──────────────────────────────────────────────────
-
-def validate_mcqs(
-    raw_mcqs: list[dict],
-) -> tuple[list[dict], list[dict]]:
+def validate_mcqs(raw_mcqs: list[dict]) -> tuple[list[dict], list[dict]]:
     """
-    Validate và filter MCQ list.
+    Validate and filter MCQs.
 
     Returns:
-        (valid_mcqs, rejected) where rejected = [{mcq, reason}]
+        (valid_mcqs, rejected)
     """
-    valid   = []
+    valid = []
     rejected = []
-    seen_questions = set()
+    seen_questions: set[str] = set()
 
     for mcq in raw_mcqs:
-        reason = _check(mcq, seen_questions)
-        if reason:
-            rejected.append({"mcq": mcq, "reason": reason})
+        schema_reason = _check_schema(mcq)
+        if schema_reason:
+            rejected.append({"mcq": mcq, "reason": schema_reason, "layer": "schema"})
+            continue
+
+        _normalize_fields(mcq)
+        quality_reason = _check_quality(mcq, seen_questions)
+        mcq["quality_score"] = quality_score(mcq, seen_questions)
+        expected = BLOOM_BY_DIFFICULTY.get(mcq["difficulty"], set())
+        mcq["bloom_mismatch"] = mcq["bloom_level"] not in expected if expected else False
+
+        if quality_reason:
+            rejected.append({"mcq": mcq, "reason": quality_reason, "layer": "quality"})
         else:
             valid.append(mcq)
             seen_questions.add(_normalize_q(mcq["question"]))
@@ -49,190 +62,183 @@ def validate_mcqs(
     return valid, rejected
 
 
-# ── Validation rules ───────────────────────────────────────────────
+def _check_schema(mcq: dict) -> str | None:
+    """Layer 1: required fields and controlled vocabularies."""
+    if not isinstance(mcq, dict):
+        return f"MCQ is not an object: {type(mcq).__name__}"
 
-def _check(mcq: dict, seen_questions: set) -> str | None:
-    """
-    Trả về reason string nếu MCQ invalid, None nếu OK.
-    Kiểm tra theo thứ tự ưu tiên.
-    """
-    # 1. Thiếu field
     missing = REQUIRED_FIELDS - set(mcq.keys())
     if missing:
-        return f"Missing fields: {missing}"
+        return f"Missing fields: {sorted(missing)}"
 
-    # 2. Question rỗng hoặc quá ngắn
-    q = str(mcq.get("question", "")).strip()
-    if not q or len(q) < MIN_QUESTION_LEN:
-        return f"Question too short ({len(q)} chars)"
-
-    # 3. Options rỗng
-    for opt in ["A", "B", "C", "D"]:
-        val = str(mcq.get(opt, "")).strip()
-        if not val:
-            return f"Option {opt} is empty"
-
-    # 4. Answer không hợp lệ
     answer = str(mcq.get("answer", "")).strip().upper()
     if answer not in VALID_ANSWERS:
         return f"Invalid answer: '{answer}' (must be A/B/C/D)"
 
-    # 5. bloom_level không hợp lệ
     bloom = str(mcq.get("bloom_level", "")).strip().lower()
     if bloom not in VALID_BLOOM:
         return f"Invalid bloom_level: '{bloom}'"
 
-    # 6. difficulty không hợp lệ
     diff = str(mcq.get("difficulty", "")).strip().lower()
     if diff not in VALID_DIFFICULTY:
         return f"Invalid difficulty: '{diff}'"
 
-    # 7. Explanation rỗng
-    exp = str(mcq.get("explanation", "")).strip()
-    if not exp:
-        return "Explanation is empty"
-
-    # 8. Correct answer trùng với distractor
-    correct_text = str(mcq.get(answer, "")).strip().lower()
-    for opt in ["A", "B", "C", "D"]:
-        if opt != answer:
-            dist_text = str(mcq.get(opt, "")).strip().lower()
-            if correct_text == dist_text:
-                return f"Option {opt} is identical to correct answer {answer}"
-
-    # 9. Duplicate question
-    if _normalize_q(q) in seen_questions:
-        return "Duplicate question"
-
-    # 10. Bloom/Difficulty consistency
-    # Cảnh báo nếu không khớp nhưng KHÔNG reject — vì Gemini hay ignore
-    # Chỉ reject trường hợp cực đoan: hard nhưng bloom là remember/understand
-    expected_blooms = BLOOM_BY_DIFFICULTY.get(diff, set())
-    if expected_blooms and bloom not in expected_blooms:
-        # Log warning nhưng chỉ reject nếu hard+lower_order (rõ ràng sai)
-        if diff == "hard" and bloom in {"remember", "understand"}:
-            return f"Bloom/Difficulty mismatch: difficulty=hard nhung bloom={bloom} (phai la evaluate/create)"
-
-    # Normalize answer field (phòng trường hợp Gemini trả về "b" thay vì "B")
-    mcq["answer"] = answer
-    mcq["bloom_level"] = bloom
-    mcq["difficulty"] = diff
-    # Ghi thêm flag nếu bloom không khớp expected (dùng cho scorer.py sau)
-    expected = BLOOM_BY_DIFFICULTY.get(diff, set())
-    mcq["bloom_mismatch"] = bloom not in expected if expected else False
+    for field in REQUIRED_FIELDS:
+        if not isinstance(mcq.get(field), (str, int, float, bool)):
+            return f"Invalid type for {field}: {type(mcq.get(field)).__name__}"
 
     return None
 
 
+def _check_quality(mcq: dict, seen_questions: set[str]) -> str | None:
+    """Layer 2: MCQ formal quality checks."""
+    q = str(mcq.get("question", "")).strip()
+    if not q or len(q) < MIN_QUESTION_LEN:
+        return f"Question too short ({len(q)} chars)"
+
+    options = [str(mcq.get(opt, "")).strip() for opt in ["A", "B", "C", "D"]]
+    for opt, val in zip(["A", "B", "C", "D"], options):
+        if not val:
+            return f"Option {opt} is empty"
+
+    normalized_options = [_normalize_option(o) for o in options]
+    if len(set(normalized_options)) < 4:
+        return "Duplicate options"
+
+    answer = mcq["answer"]
+    correct_text = _normalize_option(str(mcq.get(answer, "")))
+    for opt in ["A", "B", "C", "D"]:
+        if opt != answer and _normalize_option(str(mcq.get(opt, ""))) == correct_text:
+            return f"Option {opt} is identical to correct answer {answer}"
+
+    if not str(mcq.get("explanation", "")).strip():
+        return "Explanation is empty"
+
+    if _normalize_q(q) in seen_questions:
+        return "Duplicate question"
+
+    bloom = mcq["bloom_level"]
+    diff = mcq["difficulty"]
+    if diff == "hard" and bloom in {"remember", "understand"}:
+        return f"Bloom/Difficulty mismatch: difficulty=hard but bloom={bloom}"
+
+    return None
+
+
+def quality_score(mcq: dict, seen_questions: set[str] | None = None) -> float:
+    """
+    Lightweight 0..1 score for experiments.
+
+    Components:
+      0.2 schema ok
+      0.2 four unique options
+      0.2 explanation present
+      0.2 bloom/difficulty aligned
+      0.2 non-duplicate question
+    """
+    seen_questions = seen_questions or set()
+    score = 0.0
+
+    if _check_schema(mcq) is None:
+        score += 0.2
+
+    options = [_normalize_option(str(mcq.get(o, ""))) for o in ["A", "B", "C", "D"]]
+    if all(options) and len(set(options)) == 4:
+        score += 0.2
+
+    if str(mcq.get("explanation", "")).strip():
+        score += 0.2
+
+    diff = str(mcq.get("difficulty", "")).strip().lower()
+    bloom = str(mcq.get("bloom_level", "")).strip().lower()
+    expected = BLOOM_BY_DIFFICULTY.get(diff)
+    if expected and bloom in expected:
+        score += 0.2
+
+    q = _normalize_q(str(mcq.get("question", "")))
+    if q and q not in seen_questions:
+        score += 0.2
+
+    return round(score, 2)
+
+
+def _normalize_fields(mcq: dict) -> None:
+    mcq["answer"] = str(mcq["answer"]).strip().upper()
+    mcq["bloom_level"] = str(mcq["bloom_level"]).strip().lower()
+    mcq["difficulty"] = str(mcq["difficulty"]).strip().lower()
+    for key in REQUIRED_FIELDS:
+        mcq[key] = str(mcq[key]).strip()
+
+
 def _normalize_q(q: str) -> str:
-    """Chuẩn hóa question để so sánh duplicate."""
     return " ".join(q.lower().split())
 
 
-# ── Stats helper ───────────────────────────────────────────────────
+def _normalize_option(option: str) -> str:
+    return " ".join(option.lower().split())
+
 
 def validation_stats(valid: list[dict], rejected: list[dict]) -> dict:
-    """Trả về dict thống kê — dùng trong Streamlit UI."""
+    """Return aggregate stats for UI and experiments."""
     total = len(valid) + len(rejected)
     bloom_dist = {}
-    diff_dist  = {}
+    diff_dist = {}
     for mcq in valid:
         b = mcq.get("bloom_level", "unknown")
         d = mcq.get("difficulty", "unknown")
         bloom_dist[b] = bloom_dist.get(b, 0) + 1
-        diff_dist[d]  = diff_dist.get(d, 0) + 1
+        diff_dist[d] = diff_dist.get(d, 0) + 1
 
     reject_reasons = {}
+    reject_layers = {}
     for r in rejected:
-        reason_key = r["reason"].split(":")[0]  # group by reason type
+        reason_key = r["reason"].split(":")[0]
         reject_reasons[reason_key] = reject_reasons.get(reason_key, 0) + 1
+        layer = r.get("layer", "unknown")
+        reject_layers[layer] = reject_layers.get(layer, 0) + 1
 
-    # Dem so MCQ co bloom mismatch (warning, khong phai reject)
     bloom_mismatch_count = sum(1 for m in valid if m.get("bloom_mismatch", False))
+    avg_quality = (
+        sum(float(m.get("quality_score", 0)) for m in valid) / len(valid)
+        if valid else 0
+    )
 
     return {
-        "total_raw":           total,
-        "valid":               len(valid),
-        "rejected":            len(rejected),
-        "pass_rate":           round(len(valid) / total * 100, 1) if total else 0,
-        "bloom_dist":          bloom_dist,
-        "difficulty_dist":     diff_dist,
-        "reject_reasons":      reject_reasons,
+        "total_raw": total,
+        "valid": len(valid),
+        "rejected": len(rejected),
+        "pass_rate": round(len(valid) / total * 100, 1) if total else 0,
+        "bloom_dist": bloom_dist,
+        "difficulty_dist": diff_dist,
+        "reject_reasons": reject_reasons,
+        "reject_layers": reject_layers,
         "bloom_mismatch_count": bloom_mismatch_count,
         "bloom_mismatch_rate": round(bloom_mismatch_count / len(valid) * 100, 1) if valid else 0,
+        "average_quality_score": round(avg_quality, 3),
     }
 
 
-# ── CLI test ───────────────────────────────────────────────────────
-
 if __name__ == "__main__":
-    import sys, json
+    import sys
 
     if sys.platform == "win32":
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-    # Test với data giả: mix valid + invalid
     sample_raw = [
-        {   # VALID
+        {
             "question": "What does the pipe symbol | represent in regular expressions?",
             "A": "Concatenation of two patterns",
-            "B": "Disjunction — matches either left or right pattern",
+            "B": "Disjunction, matching either left or right pattern",
             "C": "Negation of a character class",
             "D": "Repetition of the previous character",
             "answer": "B",
-            "explanation": "The pipe | is used for disjunction in regex, e.g., 'cat|dog' matches either 'cat' or 'dog'.",
+            "explanation": "The pipe is used for disjunction in regex.",
             "bloom_level": "understand",
             "difficulty": "easy",
             "source_chunk": "chunk_001",
         },
-        {   # INVALID: missing fields
-            "question": "What is stemming?",
-            "answer": "A",
-        },
-        {   # INVALID: bad answer
-            "question": "Which algorithm reduces words to their root form using rewrite rules?",
-            "A": "BPE", "B": "Word2Vec", "C": "Porter Stemmer", "D": "BERT",
-            "answer": "X",
-            "explanation": "Porter Stemmer uses rule-based approach.",
-            "bloom_level": "remember", "difficulty": "easy", "source_chunk": "chunk_002",
-        },
-        {   # VALID
-            "question": "In Heaps Law, what does a beta value between 0.67 and 0.75 indicate?",
-            "A": "Vocabulary size grows linearly with corpus size",
-            "B": "Vocabulary size grows faster than square root of token count",
-            "C": "Vocabulary size remains constant after a threshold",
-            "D": "Vocabulary size decreases as corpus grows",
-            "answer": "B",
-            "explanation": "Heaps Law states |V| = kN^beta; with beta ~0.67-0.75, vocabulary grows sub-linearly but faster than square root.",
-            "bloom_level": "analyze",
-            "difficulty": "medium",
-            "source_chunk": "chunk_003",
-        },
-        {   # INVALID: duplicate
-            "question": "What does the pipe symbol | represent in regular expressions?",
-            "A": "A", "B": "Disjunction", "C": "C", "D": "D",
-            "answer": "B", "explanation": "dup",
-            "bloom_level": "understand", "difficulty": "easy", "source_chunk": "chunk_001",
-        },
+        {"question": "What is stemming?", "answer": "A"},
     ]
-
     valid, rejected = validate_mcqs(sample_raw)
-    stats = validation_stats(valid, rejected)
-
-    print(f"\n{'='*50}")
-    print(f"  Total raw : {stats['total_raw']}")
-    print(f"  Valid     : {stats['valid']}  ({stats['pass_rate']}%)")
-    print(f"  Rejected  : {stats['rejected']}")
-    print(f"{'='*50}")
-
-    print(f"\nBloom distribution : {stats['bloom_dist']}")
-    print(f"Difficulty dist    : {stats['difficulty_dist']}")
-    print(f"Reject reasons     : {stats['reject_reasons']}")
-
-    print(f"\n--- Rejected detail ---")
-    for r in rejected:
-        print(f"  [{r['reason']}] Q: {str(r['mcq'].get('question',''))[:50]}")
-
-    print(f"\n--- Valid MCQs ---")
-    for i, mcq in enumerate(valid, 1):
-        print(f"  {i}. [{mcq['bloom_level']}/{mcq['difficulty']}] {mcq['question'][:60]}")
+    print(validation_stats(valid, rejected))
+    print("Rejected:", rejected)

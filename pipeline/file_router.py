@@ -5,9 +5,9 @@ Router trung tâm: nhận bất kỳ file nào → trả về List[page_dict]
 cùng schema với pdf_parser để chunker/generator không cần sửa gì.
 
 Supported formats:
-  .pdf   → pdf_parser.py   (pymupdf4llm — LLM-optimized Markdown)
-  .docx  → docx_parser.py  (python-docx)
-  .pptx  → pptx_parser.py  (python-pptx)
+  .pdf              → pdf_parser.py       (pymupdf4llm — LLM-optimized Markdown)
+  .pptx/.docx/.xlsx → markitdown_parser.py
+  images            → markitdown_parser.py (vision)
 
 Usage:
   from pipeline.file_router import parse_file, get_metadata, SUPPORTED_EXTENSIONS

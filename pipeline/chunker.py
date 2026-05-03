@@ -27,10 +27,11 @@ from __future__ import annotations
 import re
 
 # ── Constants ─────────────────────────────────────────────────────────
-MIN_CHUNK_CHARS    = 150
+MIN_CHUNK_CHARS     = 150
 MAX_PAGES_PER_CHUNK = 6
-OVERLAP_THRESHOLD  = 0.12   # #7: ít nhất 12% từ chung → giữ trong cùng chunk
-MIN_IMAGE_CHARS    = 200    # #2: image chunk có text < ngưỡng này → merge
+OVERLAP_THRESHOLD   = 0.12   # #7: ít nhất 12% từ chung → giữ trong cùng chunk
+MIN_IMAGE_CHARS     = 200    # #2: image chunk có text < ngưỡng này → merge
+WHOLE_DOC_THRESHOLD = 60_000  # chars (~15k tokens) — dưới ngưỡng này whole_doc an toàn
 
 # ── Keywords cho chunk_type ───────────────────────────────────────────
 _STRUCTURAL_KW = [
@@ -62,20 +63,24 @@ def chunk_pages(
 
     Args:
         pages      : output từ pdf_parser / markitdown_parser
-        strategy   : "title" | "overlap" | "fixed" | "auto"
+        strategy   : "title" | "overlap" | "fixed" | "auto" | "whole_doc"
         max_pages  : số trang tối đa trong 1 chunk
         min_chars  : ngưỡng để tag chunk là "stub"
         fixed_size : số trang/chunk khi dùng strategy="fixed"
 
     Returns:
         List[{chunk_id, chunk_type, topic, pages, text, has_image}]
+        whole_doc trả về list 1 phần tử, is_whole_doc=True
     """
     if not pages:
         return []
 
     pages = _dedup_pages(pages)
 
-    if strategy == "auto":
+    if strategy == "whole_doc":
+        chunks = [_whole_doc_chunk(pages)]
+
+    elif strategy == "auto":
         chunks = _chunk_by_title(pages, max_pages)
         unique_topics = len(set(c["topic"] for c in chunks))
         total_chunks  = len(chunks)
@@ -97,7 +102,7 @@ def chunk_pages(
     elif strategy == "fixed":
         chunks = _chunk_fixed(pages, fixed_size, max_pages)
     else:
-        raise ValueError(f"strategy phải là 'title'|'overlap'|'fixed'|'auto'. Nhận: {strategy}")
+        raise ValueError(f"strategy phải là 'title'|'overlap'|'fixed'|'auto'|'whole_doc'. Nhận: {strategy}")
 
     # #2: merge image chunk yếu vào chunk liền kề
     chunks = _handle_weak_image_chunks(chunks)
@@ -114,6 +119,35 @@ def chunk_pages(
 
 
 # ── Strategies ────────────────────────────────────────────────────────
+
+def _whole_doc_chunk(pages: list[dict]) -> dict:
+    """
+    Gom toàn bộ pages thành 1 chunk duy nhất.
+    Mỗi section được ngăn cách bằng '---' và có tiêu đề rõ để Gemini
+    vẫn hiểu cấu trúc document dù không có heading trong text.
+    """
+    content_pages = [p for p in pages if p.get("text", "").strip()]
+    if not content_pages:
+        return {
+            "chunk_id": "", "chunk_type": "stub", "topic": "Document",
+            "pages": [], "text": "", "has_image": False, "is_whole_doc": True,
+        }
+
+    parts = []
+    for p in content_pages:
+        header = f"[{p['title']}]" if p.get("title") else f"[Page {p['page_num']}]"
+        parts.append(f"{header}\n{p['text'].strip()}")
+
+    return {
+        "chunk_id"    : "",
+        "chunk_type"  : "conceptual",
+        "topic"       : content_pages[0].get("title", "Document"),
+        "pages"       : [p["page_num"] for p in content_pages],
+        "text"        : "\n\n---\n\n".join(parts),
+        "has_image"   : any(p.get("has_image", False) for p in content_pages),
+        "is_whole_doc": True,
+    }
+
 
 def _dedup_pages(pages: list[dict]) -> list[dict]:
     """Bỏ page có text trùng > 95% với page trước (window 3)."""

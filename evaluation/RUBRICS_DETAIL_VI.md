@@ -10,7 +10,8 @@ Relevance:
 Answerability:
 - 5: Đọc source là trả lời được chắc chắn, không cần kiến thức ngoài
 - 4: Trả lời được với một chút suy luận từ source
-- 3: Cần suy luận đáng kể hoặc kiến thức nền nhẹ
+- 3: Cần suy luận đáng kể từ source, 
+     hoặc kiến thức nền tối thiểu để hiểu câu hỏi
 - 2: Source có gợi ý nhưng không đủ để trả lời chắc chắn
 - 1: Source không có đủ thông tin để trả lời
 
@@ -24,6 +25,7 @@ Bloom Alignment:
 Answer Correctness:
 - 5: Đáp án được gán hoàn toàn chính xác theo source
 - 4: Đúng nhưng explanation chưa đầy đủ
-- 3: Đáp án đúng nhưng có thể tranh luận
+- 3: Đáp án đúng nhưng một option khác cũng 
+     có thể bảo vệ được — ambiguous distractors
 - 2: Đáp án có thể sai hoặc misleading
 - 1: Đáp án sai so với source

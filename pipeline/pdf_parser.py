@@ -13,9 +13,16 @@ Fixes:
 """
 
 import re
+import statistics
 import fitz
 import pymupdf4llm
 from pathlib import Path
+
+from pipeline.layout_analyzer import (
+    analyze_text_layout,
+    analyze_pdf_page_layout,
+    merge_layout_flags,
+)
 
 
 MIN_CHARS       = 50
@@ -27,7 +34,10 @@ _GARBLED_RATIO  = 0.25   # #3: tỉ lệ ký tự đơn / tổng từ để coi 
 def parse_pdf(pdf_path: str) -> list[dict]:
     """
     Parse PDF → list of page dicts.
-    Returns: List[{page_num, title, text, char_count, has_image}]
+    Returns: List[{page_num, title, text, char_count, has_image,
+                   has_table, has_formula, has_caption, has_columns,
+                   layout_sensitive, vision_used, parser, ocr_used,
+                   text_quality, warnings}]
     """
     path = Path(pdf_path)
     if not path.exists():
@@ -49,15 +59,21 @@ def parse_pdf(pdf_path: str) -> list[dict]:
         page_num  = raw_page + 1
         text      = chunk["text"].strip()
         has_image = len(chunk.get("images", [])) > 0
+        parser    = "pymupdf4llm"
+        ocr_used  = False
+        warnings  = []
 
         # #9: trang ít text + có ảnh → có thể là scan → thử pytesseract
         if len(text) < MIN_CHARS:
             if has_image:
+                warnings.append("low_text_with_image")
                 _log(f"  page {page_num}: ít text ({len(text)} chars) + có ảnh → thử OCR")
                 ocr_text = _pytesseract_extract_page(str(path), i)
                 if len(ocr_text.strip()) >= MIN_CHARS:
                     _log(f"  page {page_num}: OCR OK ({len(ocr_text.strip())} chars)")
                     text = ocr_text.strip()
+                    parser = "pytesseract"
+                    ocr_used = True
                 else:
                     _log(f"  page {page_num}: SKIP (OCR cũng không đủ text)")
                     continue
@@ -67,22 +83,40 @@ def parse_pdf(pdf_path: str) -> list[dict]:
 
         # #3: detect garbled Vietnamese font → thử pdfplumber
         if _is_garbled(text):
+            warnings.append("garbled_text_detected")
             _log(f"  page {page_num}: WARN font lỗi → thử pdfplumber")
             fallback = _pdfplumber_extract(str(path), page_num)
             if fallback and not _is_garbled(fallback) and len(fallback) >= MIN_CHARS:
                 _log(f"  page {page_num}: pdfplumber OK ({len(fallback)} chars)")
                 text = fallback
+                parser = "pdfplumber"
             else:
                 _log(f"  page {page_num}: pdfplumber không cải thiện → giữ nguyên")
 
         title = _extract_title(text) or f"Page {page_num}"
 
+        text_layout = analyze_text_layout(text, has_image=has_image)
+        pdf_layout  = analyze_pdf_page_layout(str(path), i)
+        layout      = merge_layout_flags(text_layout, pdf_layout)
+        warnings   += [w for w in pdf_layout.get("warnings", [])
+                       if w not in ("no_text_blocks",)]
+
         pages.append({
-            "page_num":   page_num,
-            "title":      title,
-            "text":       text,
-            "char_count": len(text),
-            "has_image":  has_image,
+            "page_num":        page_num,
+            "title":           title,
+            "text":            text,
+            "char_count":      len(text),
+            "has_image":       has_image,
+            "parser":          parser,
+            "ocr_used":        ocr_used,
+            "text_quality":    _text_quality(text),
+            "warnings":        warnings,
+            "has_table":       layout["has_table"],
+            "has_formula":     layout["has_formula"],
+            "has_caption":     layout["has_caption"],
+            "has_columns":     layout["has_columns"],
+            "layout_sensitive": layout["layout_sensitive"],
+            "vision_used":     layout["vision_used"],
         })
 
     pages.sort(key=lambda p: p["page_num"])
@@ -225,13 +259,40 @@ def _split_page_by_paragraphs(page: dict, max_chars: int) -> list[dict]:
 
 
 def _make_subpage(original: dict, text: str) -> dict:
+    has_image   = original.get("has_image", False)
+    text_layout = analyze_text_layout(text, has_image=has_image)
     return {
-        "page_num":   original["page_num"],  # tạm thời, renumber ở _split_oversized_pages
-        "title":      _extract_title(text) or original["title"],
-        "text":       text,
-        "char_count": len(text),
-        "has_image":  original.get("has_image", False),
+        "page_num":        original["page_num"],  # tạm thời, renumber ở _split_oversized_pages
+        "title":           _extract_title(text) or original["title"],
+        "text":            text,
+        "char_count":      len(text),
+        "has_image":       has_image,
+        "parser":          original.get("parser", "pymupdf4llm"),
+        "ocr_used":        original.get("ocr_used", False),
+        "text_quality":    _text_quality(text),
+        "warnings":        list(original.get("warnings", [])) + ["split_oversized_page"],
+        "has_table":       text_layout["has_table"],
+        "has_formula":     text_layout["has_formula"],
+        "has_caption":     text_layout["has_caption"],
+        "has_columns":     text_layout["has_columns"],
+        "layout_sensitive": text_layout["layout_sensitive"],
+        "vision_used":     original.get("vision_used", False),
     }
+
+
+def _text_quality(text: str) -> str:
+    """Classify extracted text quality for debugging and experiments."""
+    n_chars = len(text.strip())
+    if n_chars < MIN_CHARS:
+        return "low_text"
+    if _is_garbled(text):
+        return "garbled"
+    words = text.split()
+    if words:
+        avg_word_len = statistics.mean(len(w) for w in words)
+        if avg_word_len < 2:
+            return "noisy"
+    return "good"
 
 
 # ── Metadata & helpers ────────────────────────────────────────────────

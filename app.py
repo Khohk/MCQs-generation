@@ -25,7 +25,7 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 _defaults = {
     "pdf_path": None, "pdf_name": None,
     "pages": None, "chunks": None,
-    "raw_mcqs": None, "mcqs": None, "stats": None,
+    "raw_mcqs": None, "mcqs": None, "stats": None, "doc_analysis": None,
     "config": {},
     "page_range": None,
 }
@@ -56,7 +56,7 @@ with tab1:
             st.session_state.pdf_path = str(save_path.resolve())
             st.session_state.pdf_name = uploaded.name
             # Reset kết quả cũ khi upload file mới
-            for k in ["pages", "chunks", "raw_mcqs", "mcqs", "stats", "page_range"]:
+            for k in ["pages", "chunks", "raw_mcqs", "mcqs", "stats", "doc_analysis", "page_range"]:
                 st.session_state[k] = None
             st.success(f"File: **{uploaded.name}** ({uploaded.size // 1024} KB)")
 
@@ -65,7 +65,8 @@ with tab1:
 
             # ── Checkpoint info ──────────────────────────────────
             from pipeline.generator import get_checkpoint_info
-            ckpt = get_checkpoint_info(st.session_state.pdf_name)
+            ckpt_key = st.session_state.pdf_path or st.session_state.pdf_name
+            ckpt = get_checkpoint_info(ckpt_key)
             if ckpt:
                 st.warning(
                     f"Co checkpoint cu: {ckpt['chunks_done']} chunks, "
@@ -74,7 +75,7 @@ with tab1:
                 )
                 if st.button("Xoa checkpoint, chay lai tu dau"):
                     from pipeline.generator import clear_checkpoint
-                    clear_checkpoint(st.session_state.pdf_name)
+                    clear_checkpoint(ckpt_key)
                     st.rerun()
 
     with col2:
@@ -106,7 +107,7 @@ with tab1:
     st.divider()
     if st.session_state.pdf_name:
         if st.button("Bat dau xu ly", type="primary", use_container_width=True):
-            for k in ["pages", "chunks", "raw_mcqs", "mcqs", "stats"]:
+            for k in ["pages", "chunks", "raw_mcqs", "mcqs", "stats", "doc_analysis"]:
                 st.session_state[k] = None
             st.rerun()
     else:
@@ -121,7 +122,7 @@ with tab2:
     run_now    = has_pdf and not has_result
 
     if st.button("Chay lai", disabled=not has_pdf):
-        for k in ["pages", "chunks", "raw_mcqs", "mcqs", "stats"]:
+        for k in ["pages", "chunks", "raw_mcqs", "mcqs", "stats", "doc_analysis"]:
             st.session_state[k] = None
         run_now = True
 
@@ -145,6 +146,7 @@ with tab2:
             from pipeline.pdf_parser import parse_pdf, get_pdf_metadata
             meta  = get_pdf_metadata(pdf_path)
             pages = parse_pdf(pdf_path)
+            from pipeline.document_analyzer import analyze_document
 
             # Apply page range filter
             pf, pt = cfg.get("page_from"), cfg.get("page_to")
@@ -152,8 +154,11 @@ with tab2:
                 pages = [p for p in pages if pf <= p["page_num"] <= pt]
                 log(f"      -> Range filter: trang {pf}-{pt}")
 
+            doc_analysis = analyze_document(pages)
             st.session_state.pages = pages
+            st.session_state.doc_analysis = doc_analysis
             log(f"      -> {len(pages)}/{meta['total_pages']} pages extracted")
+            log(f"      -> avg chars: {doc_analysis['avg_chars']} | low text: {doc_analysis['low_text_units']} | OCR: {doc_analysis['ocr_units']}")
             prog.progress(25, text="[1/4] Parse xong")
         except Exception as e:
             st.error(f"Loi parse PDF: {e}")
@@ -171,7 +176,7 @@ with tab2:
 
             # Hiển thị ETA
             from pipeline.generator import estimate_seconds, get_checkpoint_info
-            ckpt = get_checkpoint_info(pdf_name)
+            ckpt = get_checkpoint_info(pdf_path)
             n_done = ckpt["chunks_done"] if ckpt else 0
             eta = estimate_seconds(len(chunks), n_done)
             log(f"      -> {len(chunks)} chunks | ETA: ~{eta}s (~{eta//60}m{eta%60}s)")
@@ -202,7 +207,7 @@ with tab2:
                 chunks,
                 n_per_chunk=cfg.get("n_questions", 2),
                 difficulty=cfg.get("difficulty", "medium"),
-                pdf_name=pdf_name,
+                pdf_name=pdf_path,
                 on_progress=on_progress,
             )
             st.session_state.raw_mcqs = raw_mcqs
@@ -240,6 +245,11 @@ with tab2:
         mm = stats.get("bloom_mismatch_count", 0)
         c5.metric("Bloom mismatch", mm, delta=f"{stats.get('bloom_mismatch_rate',0)}%",
                   delta_color="inverse" if mm > 0 else "off")
+        if stats.get("average_quality_score") is not None:
+            st.caption(f"Average quality score: {stats.get('average_quality_score', 0)}")
+        if st.session_state.get("doc_analysis"):
+            with st.expander("Document analysis"):
+                st.json(st.session_state.doc_analysis)
         ca, cb = st.columns(2)
         with ca:
             st.markdown("**Bloom distribution**")
@@ -365,7 +375,7 @@ with tab4:
         # Xóa checkpoint sau khi export thành công
         if st.button("Xoa checkpoint sau khi export xong", use_container_width=True):
             from pipeline.generator import clear_checkpoint
-            clear_checkpoint(st.session_state.get("pdf_name", ""))
+            clear_checkpoint(st.session_state.get("pdf_path") or st.session_state.get("pdf_name", ""))
             st.success("Da xoa checkpoint.")
 
         st.divider()

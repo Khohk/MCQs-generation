@@ -40,11 +40,6 @@ def t(lang: str, *keys) -> str:
     return obj
 
 
-# ── Density → n_questions mapping ────────────────────────────────
-DENSITY_MAP = {"low": 1, "Ít": 1, "Low": 1,
-               "medium": 2, "Vừa": 2, "Medium": 2,
-               "high": 3, "Nhiều": 3, "High": 3}
-
 DIFFICULTY_MAP = {"Dễ": "easy", "Easy": "easy",
                   "Trung bình": "medium", "Medium": "medium",
                   "Khó": "hard", "Hard": "hard"}
@@ -55,12 +50,14 @@ LANG_MAP = {"Tiếng Việt": "vi", "Vietnamese": "vi",
 
 # ── Backend helpers ───────────────────────────────────────────────
 
-def estimate_questions(files, density_label: str) -> str:
+def estimate_questions(files, difficulty_label: str) -> str:
     """Ước tính số câu dựa trên file đã upload."""
     if not files:
         return ""
-    n_per_chunk = DENSITY_MAP.get(density_label, 2)
-    total_pages = 0
+    from pipeline.generator import DIFFICULTY_TO_BLOOM
+    difficulty   = DIFFICULTY_MAP.get(difficulty_label, "medium")
+    bloom_levels = DIFFICULTY_TO_BLOOM.get(difficulty, DIFFICULTY_TO_BLOOM["medium"])
+    total_pages  = 0
     for f in files:
         try:
             from pipeline.file_router import get_metadata
@@ -69,12 +66,12 @@ def estimate_questions(files, density_label: str) -> str:
         except Exception:
             total_pages += 5
     avg_pages_per_chunk = 4
-    chunks = max(1, total_pages // avg_pages_per_chunk)
-    estimated = chunks * n_per_chunk
+    chunks    = max(1, total_pages // avg_pages_per_chunk)
+    estimated = chunks * len(bloom_levels)
     return f"~{estimated}"
 
 
-def run_pipeline(files, difficulty_label, density_label, q_lang_label, lang,
+def run_pipeline(files, difficulty_label, q_lang_label, lang,
                  on_step=None):
     """
     Chay toan bo pipeline, tra ve (mcqs_json, error_msg).
@@ -87,9 +84,10 @@ def run_pipeline(files, difficulty_label, density_label, q_lang_label, lang,
     if not files:
         return None, t(lang, "upload", "no_file")
 
-    difficulty  = DIFFICULTY_MAP.get(difficulty_label, "medium")
-    n_per_chunk = DENSITY_MAP.get(density_label, 2)
-    all_pages   = []
+    from pipeline.generator import DIFFICULTY_TO_BLOOM
+    difficulty   = DIFFICULTY_MAP.get(difficulty_label, "medium")
+    bloom_levels = DIFFICULTY_TO_BLOOM.get(difficulty, DIFFICULTY_TO_BLOOM["medium"])
+    all_pages    = []
 
     # Step 1: Parse
     step(0.1, "Dang doc tai lieu...")
@@ -98,30 +96,34 @@ def run_pipeline(files, difficulty_label, density_label, q_lang_label, lang,
         for f in files:
             pages = parse_file(f.name)
             all_pages.extend(pages)
+        from pipeline.document_analyzer import analyze_document, select_chunk_strategy
+        doc_analysis = analyze_document(all_pages)
     except Exception as e:
         return None, f"Loi parse file: {e}"
 
     _log_parse(all_pages, files)
+    _log_document_analysis(doc_analysis, files)
 
     # Step 2: Chunk
     step(0.3, "Dang phan tich cau truc...")
     try:
         from pipeline.chunker import chunk_pages
-        chunks = chunk_pages(all_pages)
+        strategy = doc_analysis.get("chunk_strategy", "auto")
+        chunks = chunk_pages(all_pages, strategy=strategy)
     except Exception as e:
         return None, f"Loi chunking: {e}"
 
-    _log_chunks(chunks)
+    _log_chunks(chunks, strategy)
 
     # Step 3: Generate
-    step(0.5, f"Dang tao cau hoi tu {len(chunks)} chu de...")
+    step(0.5, f"Dang tao cau hoi ({len(chunks)} chunks × {len(bloom_levels)} Bloom levels)...")
     try:
         from pipeline.generator import generate_mcqs, get_provider_stats, reset_provider_stats
-        pdf_name = Path(files[0].name).stem if files else "upload"
+        pdf_name = files[0].name if files else "upload"
         reset_provider_stats()
         raw_mcqs = generate_mcqs(
             chunks,
-            n_per_chunk=n_per_chunk,
+            bloom_levels=bloom_levels,
             difficulty=difficulty,
             pdf_name=pdf_name,
             language=LANG_MAP.get(q_lang_label, "en"),
@@ -154,6 +156,21 @@ def _log_provider_stats(stats: dict, pdf_name: str):
         "file"          : pdf_name,
         "providers"     : stats.get("providers", []),
         "chunks_skipped": stats.get("chunks_skipped", []),
+        "chunk_logs"    : stats.get("chunk_logs", []),
+    }
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def _log_document_analysis(analysis: dict, files) -> None:
+    import json, datetime
+    log_dir = Path("data/dev_logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "document_analysis.jsonl"
+    entry = {
+        "ts": datetime.datetime.now().isoformat(),
+        "files": [Path(x.name).name for x in files],
+        "analysis": analysis,
     }
     with open(log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
@@ -174,12 +191,12 @@ def _log_parse(pages: list, files) -> None:
             f.write(f"{p['page_num']:<6} {p['title'][:40]:<42} {p['char_count']}\n")
 
 
-def _log_chunks(chunks: list) -> None:
+def _log_chunks(chunks: list, strategy: str = "auto") -> None:
     import datetime
     log_dir = Path("data/dev_logs"); log_dir.mkdir(parents=True, exist_ok=True)
     log_path = log_dir / "parse_chunks.log"
     with open(log_path, "a", encoding="utf-8") as f:
-        f.write(f"\n[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] CHUNKS → {len(chunks)} total\n")
+        f.write(f"\n[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] CHUNKS → {len(chunks)} total | strategy={strategy}\n")
         f.write(f"{'─'*60}\n")
         f.write(f"{'ID':<12} {'TOPIC':<35} {'PAGES':<16} {'CHARS'}\n")
         for c in chunks:
@@ -492,7 +509,7 @@ def get_final_score(mcqs_json: str, answers: dict) -> str:
 # ── Build Gradio UI ────────────────────────────────────────────────
 
 def build_app():
-    with gr.Blocks(title="AI MCQ Generator") as demo:
+    with gr.Blocks(title="AI MCQ Generator", theme=gr.themes.Soft()) as demo:
 
         # State — khai báo bên trong Blocks context
         mcqs_state   = gr.State(value=None)
@@ -537,11 +554,6 @@ def build_app():
                             choices=["Dễ", "Trung bình", "Khó"],
                             value="Trung bình",
                             label="Độ khó",
-                        )
-                        density_radio = gr.Radio(
-                            choices=["Ít", "Vừa", "Nhiều"],
-                            value="Vừa",
-                            label="Mật độ câu hỏi",
                         )
                         qlang_radio = gr.Radio(
                             choices=["Tiếng Việt", "English"],
@@ -676,22 +688,22 @@ def build_app():
 
         # ── Event handlers ────────────────────────────────────────
 
-        # Estimate khi đổi file hoặc density
-        def update_estimate(files, density):
+        # Estimate khi đổi file hoặc difficulty
+        def update_estimate(files, difficulty):
             if not files:
                 return ""
-            est = estimate_questions(files, density)
+            est = estimate_questions(files, difficulty)
             return f"Ước tính: **{est} câu**"
 
         file_input.change(update_estimate,
-                          inputs=[file_input, density_radio],
+                          inputs=[file_input, difficulty_radio],
                           outputs=[estimate_box])
-        density_radio.change(update_estimate,
-                             inputs=[file_input, density_radio],
-                             outputs=[estimate_box])
+        difficulty_radio.change(update_estimate,
+                                inputs=[file_input, difficulty_radio],
+                                outputs=[estimate_box])
 
         # Generate pipeline
-        def on_generate(files, difficulty, density, qlang, lang,
+        def on_generate(files, difficulty, qlang, lang,
                         progress=gr.Progress(track_tqdm=False)):
             if not files:
                 return (
@@ -705,7 +717,7 @@ def build_app():
                 progress(pct, desc=msg)
 
             mcqs_json, err = run_pipeline(
-                files, difficulty, density, qlang, lang, on_step=on_step
+                files, difficulty, qlang, lang, on_step=on_step
             )
             progress(1, desc="Hoan tat!")
 
@@ -731,7 +743,7 @@ def build_app():
 
         generate_btn.click(
             fn=on_generate,
-            inputs=[file_input, difficulty_radio, density_radio,
+            inputs=[file_input, difficulty_radio,
                     qlang_radio, lang_state],
             outputs=[progress_text, mcqs_state, stats_html, mcq_display],
         )

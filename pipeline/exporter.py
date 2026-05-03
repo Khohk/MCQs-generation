@@ -7,6 +7,7 @@ Trả về BytesIO buffer để dùng trong Streamlit st.download_button.
 """
 
 import io
+import re
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
@@ -14,6 +15,40 @@ from openpyxl.styles import Font, PatternFill, Alignment
 
 # ── Answer index mapping ───────────────────────────────────────────
 _ANSWER_TO_IDX = {"A": 1, "B": 2, "C": 3, "D": 4}
+MAX_QUESTION_CHARS = 120
+MAX_OPTION_CHARS = 75
+
+
+def _prepare_mcqs(mcqs: list[dict]) -> list[dict]:
+    """Validate and sanitize MCQs before platform export."""
+    if not mcqs:
+        raise ValueError("Khong co MCQ nao de export")
+
+    cleaned = []
+    for idx, mcq in enumerate(mcqs, 1):
+        answer = str(mcq.get("answer", "A")).strip().upper()
+        if answer not in _ANSWER_TO_IDX:
+            raise ValueError(f"MCQ #{idx} co answer khong hop le: {answer}")
+
+        item = dict(mcq)
+        item["answer"] = answer
+        item["question"] = _sanitize_text(item.get("question", ""), MAX_QUESTION_CHARS)
+        for opt in ["A", "B", "C", "D"]:
+            item[opt] = _sanitize_text(item.get(opt, ""), MAX_OPTION_CHARS)
+            if not item[opt]:
+                raise ValueError(f"MCQ #{idx} thieu option {opt}")
+        if not item["question"]:
+            raise ValueError(f"MCQ #{idx} thieu question")
+        cleaned.append(item)
+    return cleaned
+
+
+def _sanitize_text(value, max_chars: int) -> str:
+    text = str(value or "")
+    text = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", text)
+    text = re.sub(r"\s*\n+\s*", " ", text)
+    text = " ".join(text.split())
+    return text[:max_chars].rstrip()
 
 
 # ── Kahoot Excel ───────────────────────────────────────────────────
@@ -28,6 +63,7 @@ def export_kahoot(mcqs: list[dict]) -> bytes:
 
     Returns: bytes (dùng trực tiếp với st.download_button)
     """
+    mcqs = _prepare_mcqs(mcqs)
     wb = Workbook()
     ws = wb.active
     ws.title = "Kahoot MCQ"
@@ -89,6 +125,7 @@ def export_quizizz(mcqs: list[dict]) -> bytes:
 
     Returns: bytes UTF-8 với BOM (Excel đọc được tiếng Việt)
     """
+    mcqs = _prepare_mcqs(mcqs)
     rows = []
     for mcq in mcqs:
         correct_letter = mcq.get("answer", "A")

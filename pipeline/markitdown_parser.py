@@ -23,6 +23,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 from markitdown import MarkItDown
 
+from pipeline.layout_analyzer import analyze_text_layout
+
 load_dotenv()
 
 SUPPORTED_EXTENSIONS = {
@@ -181,12 +183,20 @@ def parse_to_pages(file_path: str) -> list[dict]:
         text = body.strip()
         if len(text) < 30:
             continue
+        has_image = bool(re.search(r"!\[.*?\]\(.*?\)", text))
+        layout = analyze_text_layout(text, has_image=has_image)
         pages.append({
             "page_num"  : i,
             "title"     : title,
             "text"      : text,
             "char_count": len(text),
-            "has_image" : bool(re.search(r"!\[.*?\]\(.*?\)", text)),
+            "has_image" : has_image,
+            "parser"    : "markitdown",
+            "parser_used": "markitdown",
+            "ocr_used"  : False,
+            "text_quality": _text_quality(text),
+            "warnings"  : _page_warnings(text),
+            **layout,
         })
 
     return pages
@@ -316,6 +326,23 @@ def _clean_title(raw: str) -> str:
     if cleaned.startswith("!["):
         cleaned = re.sub(r"!\[.*?\]\(.*?\)", "", cleaned).strip()
     return cleaned[:80]
+
+
+def _text_quality(text: str) -> str:
+    if len(text.strip()) < 30:
+        return "low_text"
+    if len(text.split()) < 8:
+        return "sparse"
+    return "good"
+
+
+def _page_warnings(text: str) -> list[str]:
+    warnings = []
+    if len(text.strip()) < 80:
+        warnings.append("short_section")
+    if re.search(r"!\[.*?\]\(.*?\)", text) and len(text.strip()) < 200:
+        warnings.append("image_heavy_section")
+    return warnings
 
 
 # ── Helpers ───────────────────────────────────────────────────────────
