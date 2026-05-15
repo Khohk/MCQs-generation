@@ -155,7 +155,13 @@ def _mark_disabled(idx: int, reason: str):
 
 # ── Unified API call ───────────────────────────────────────────────
 
-def _call_provider(prompt: str, idx: int, json_mode: bool = True, max_tokens: int = 2048) -> str:
+def _call_provider(
+    prompt: str,
+    idx: int,
+    json_mode: bool = True,
+    max_tokens: int = 4096,
+    temperature: float = 0.7,
+) -> str:
     """
     Gọi 1 provider và trả về raw text response.
     Raise exception nếu lỗi để caller xử lý.
@@ -174,7 +180,7 @@ def _call_provider(prompt: str, idx: int, json_mode: bool = True, max_tokens: in
     if provider == "gemini":
         from google.genai import types
         client     = _get_gemini_client()
-        cfg_kwargs = {"temperature": 0.7, "max_output_tokens": max_tokens}
+        cfg_kwargs = {"temperature": temperature, "max_output_tokens": max_tokens}
         if json_mode:
             cfg_kwargs["response_mime_type"] = "application/json"
             cfg_kwargs["response_schema"]    = list[MCQItem]  # enforce schema ở phía model
@@ -192,7 +198,7 @@ def _call_provider(prompt: str, idx: int, json_mode: bool = True, max_tokens: in
         kwargs  = {
             "model"      : model,
             "messages"   : [{"role": "user", "content": prompt}],
-            "temperature": 0.7,
+            "temperature": temperature,
             "max_tokens" : max_tokens,
         }
         if json_mode:

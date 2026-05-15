@@ -3,15 +3,21 @@ pipeline/google_forms_exporter.py
 ----------------------------------
 Export MCQs → Google Forms với auto-grading (quiz mode).
 
-Setup một lần:
-  1. Vào https://console.cloud.google.com → tạo project mới
-  2. Enable "Google Forms API" + "Google Drive API"
-  3. Tạo OAuth 2.0 credentials → loại "Desktop app"
-  4. Download → đặt tên credentials.json, để vào thư mục gốc project
+Có 2 chế độ auth — ưu tiên theo thứ tự:
 
-Chỉ chạy được local (không dùng trên HF Spaces — OAuth cần browser cùng máy).
+1. Service Account (HF Spaces / production)
+   - Đặt biến môi trường GOOGLE_SERVICE_ACCOUNT_JSON = nội dung file JSON
+   - HF Spaces: Settings → Secrets → thêm GOOGLE_SERVICE_ACCOUNT_JSON
+   - Form được tạo trong Drive của service account, share public tự động
+
+2. OAuth Desktop (local dev)
+   - Tạo OAuth 2.0 credentials (Desktop app) trên Google Cloud Console
+   - Download → đặt tên credentials.json vào thư mục gốc project
+   - Lần đầu chạy sẽ mở browser để authorize
 """
 
+import json
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -25,33 +31,78 @@ TOKEN_PATH    = _PROJECT_ROOT / ".google_token.json"
 CREDS_PATH    = _PROJECT_ROOT / "credentials.json"
 
 
-# ── Auth ───────────────────────────────────────────────────────────
+# ── Auth mode detection ────────────────────────────────────────────
+
+def _get_service_account_credentials():
+    """Lấy credentials từ GOOGLE_SERVICE_ACCOUNT_JSON env var."""
+    sa_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    if not sa_json:
+        return None
+    try:
+        from google.oauth2 import service_account
+        info = json.loads(sa_json)
+        return service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+    except Exception:
+        return None
+
+
+def _get_oauth_credentials():
+    """Lấy credentials từ local OAuth token."""
+    if not TOKEN_PATH.exists():
+        return None
+    try:
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+        if creds.valid:
+            return creds
+        if creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
+            return creds
+        return None
+    except Exception:
+        return None
+
+
+def _get_valid_credentials():
+    """Service Account trước, OAuth sau."""
+    return _get_service_account_credentials() or _get_oauth_credentials()
+
+
+# ── Status helpers ─────────────────────────────────────────────────
+
+def has_service_account() -> bool:
+    return bool(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip())
 
 def has_credentials_file() -> bool:
     return CREDS_PATH.exists()
 
-
 def is_authenticated() -> bool:
-    if not TOKEN_PATH.exists():
-        return False
-    try:
-        from google.oauth2.credentials import Credentials
-        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
-        return creds.valid or bool(creds.expired and creds.refresh_token)
-    except Exception:
-        return False
+    return _get_valid_credentials() is not None
 
+def auth_mode() -> str:
+    """'service_account' | 'oauth' | 'none'"""
+    if has_service_account():
+        creds = _get_service_account_credentials()
+        return "service_account" if creds else "none"
+    if _get_oauth_credentials():
+        return "oauth"
+    return "none"
+
+
+# ── OAuth flow (local only) ────────────────────────────────────────
 
 def authenticate() -> tuple[bool, str]:
-    """
-    Chạy OAuth flow — mở browser để user authorize.
-    Returns (success, message).
-    """
+    """OAuth Desktop flow — chỉ dùng local."""
+    if has_service_account():
+        return True, "Đang dùng Service Account — không cần kết nối thủ công."
+
     if not CREDS_PATH.exists():
         return False, (
-            "Không tìm thấy credentials.json.\n"
-            "Xem hướng dẫn: tạo OAuth 2.0 credentials trên Google Cloud Console "
-            "→ loại Desktop app → download → đặt tên credentials.json vào thư mục project."
+            "Không tìm thấy credentials.json. "
+            "Tạo OAuth 2.0 credentials (Desktop app) trên Google Cloud Console "
+            "→ download → đặt vào thư mục project."
         )
     try:
         from google_auth_oauthlib.flow import InstalledAppFlow
@@ -64,42 +115,18 @@ def authenticate() -> tuple[bool, str]:
 
         if creds and creds.valid:
             return True, "Đã xác thực."
-
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
-            _save_token(creds)
+            TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
             return True, "Token đã được làm mới."
 
         flow = InstalledAppFlow.from_client_secrets_file(str(CREDS_PATH), SCOPES)
         creds = flow.run_local_server(port=0)
-        _save_token(creds)
+        TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
         return True, "Xác thực thành công!"
 
     except Exception as e:
         return False, f"Lỗi xác thực: {e}"
-
-
-def _save_token(creds):
-    TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
-
-
-def _get_valid_credentials():
-    if not TOKEN_PATH.exists():
-        return None
-    try:
-        from google.oauth2.credentials import Credentials
-        from google.auth.transport.requests import Request
-
-        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
-        if creds.valid:
-            return creds
-        if creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            _save_token(creds)
-            return creds
-        return None
-    except Exception:
-        return None
 
 
 # ── Export ─────────────────────────────────────────────────────────
@@ -110,31 +137,39 @@ def export_to_google_forms(
 ) -> tuple[bool, str]:
     """
     Tạo Google Form với quiz mode + auto-grading.
-    Returns (success, edit_url_or_error_message).
+    Returns (success, view_url_or_error).
     """
     creds = _get_valid_credentials()
     if creds is None:
-        return False, "Chưa xác thực. Vui lòng kết nối Google trước."
+        return False, "Chưa xác thực. Vui lòng kết nối Google hoặc cài GOOGLE_SERVICE_ACCOUNT_JSON."
 
     try:
         from googleapiclient.discovery import build
 
-        service = build("forms", "v1", credentials=creds, cache_discovery=False)
+        forms_svc = build("forms", "v1", credentials=creds, cache_discovery=False)
 
-        # Bước 1: Tạo form trống
-        form = service.forms().create(body={"info": {"title": title}}).execute()
+        form = forms_svc.forms().create(body={"info": {"title": title}}).execute()
         form_id = form["formId"]
 
-        # Bước 2: batchUpdate — enable quiz + thêm câu hỏi
-        # quiz settings phải đứng đầu list
         requests = [_quiz_settings_request()]
         for idx, mcq in enumerate(mcqs):
             requests.append(_question_request(mcq, idx))
 
-        service.forms().batchUpdate(
+        forms_svc.forms().batchUpdate(
             formId=form_id,
             body={"requests": requests},
         ).execute()
+
+        # Service account: share form publicly so anyone with link can view
+        if has_service_account():
+            try:
+                drive_svc = build("drive", "v3", credentials=creds, cache_discovery=False)
+                drive_svc.permissions().create(
+                    fileId=form_id,
+                    body={"type": "anyone", "role": "reader"},
+                ).execute()
+            except Exception:
+                pass  # share thất bại vẫn trả link — user có thể mở nếu được share riêng
 
         view_url = f"https://docs.google.com/forms/d/{form_id}/viewform"
         return True, view_url

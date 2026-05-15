@@ -45,7 +45,11 @@ def parse_pdf(pdf_path: str) -> list[dict]:
     if path.suffix.lower() != ".pdf":
         raise ValueError(f"File phải là .pdf, nhận được: {path.suffix}")
 
-    chunks = pymupdf4llm.to_markdown(str(path), page_chunks=True)
+    try:
+        chunks = pymupdf4llm.to_markdown(str(path), page_chunks=True)
+    except Exception as e:
+        _log(f"  [pdf] pymupdf4llm failed ({type(e).__name__}: {str(e)[:80]}) → fitz fallback")
+        chunks = _fitz_extract_chunks(str(path))
 
     total_chars = sum(len(c["text"].strip()) for c in chunks)
     n_pages     = len(chunks)
@@ -306,6 +310,23 @@ def get_pdf_metadata(pdf_path: str) -> dict:
             "author":       meta.get("author", ""),
             "file_size_kb": round(Path(pdf_path).stat().st_size / 1024, 1),
         }
+
+
+def _fitz_extract_chunks(pdf_path: str) -> list[dict]:
+    """Fallback: extract text per page using fitz directly (no ONNX/layout)."""
+    chunks = []
+    with fitz.open(pdf_path) as doc:
+        for i, page in enumerate(doc):
+            text = page.get_text("markdown")
+            if not text.strip():
+                text = page.get_text("text")
+            images = page.get_images(full=False)
+            chunks.append({
+                "text":     text,
+                "images":   images,
+                "metadata": {"page": i},
+            })
+    return chunks
 
 
 def _log(msg: str):
