@@ -234,10 +234,10 @@ def test_generate_mcq_tier_b_one_distractor():
     assert tier == "B"
     assert data is not None
 
-def test_generate_mcq_tier_b_zero_distractors():
+def test_generate_mcq_tier_c_zero_distractors():
     llm = _make_llm(json.dumps(_valid_mcq_data()))
     data, tier = generate_mcq(_ku("seg_001_ku_01"), [], "understand", llm)
-    assert tier == "B"
+    assert tier == "C"
 
 def test_generate_mcq_bad_json_returns_none():
     llm = _make_llm("not valid json {{{")
@@ -479,7 +479,7 @@ def run():
         # generate_mcq
         ("generate_mcq: 3 distractors → Tier A",     test_generate_mcq_tier_a_three_distractors),
         ("generate_mcq: 1 distractor → Tier B",      test_generate_mcq_tier_b_one_distractor),
-        ("generate_mcq: 0 distractors → Tier B",     test_generate_mcq_tier_b_zero_distractors),
+        ("generate_mcq: 0 distractors → Tier C",     test_generate_mcq_tier_c_zero_distractors),
         ("generate_mcq: bad JSON → (None, '')",      test_generate_mcq_bad_json_returns_none),
         ("generate_mcq: invalid MCQ → (None, '')",   test_generate_mcq_validation_fail_returns_none),
         ("generate_mcq: empty response → None",      test_generate_mcq_empty_response),

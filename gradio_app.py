@@ -200,6 +200,7 @@ def run_pipeline(files, difficulty_label, q_lang_label, lang,
                 language=question_lang,
                 horizontal_only=(difficulty != "hard"),
                 max_questions=6 if difficulty == "medium" else 8,
+                answer_offset=len(mcqs),
             )
         except Exception as e:
             print(f"[Gradio] cross MCQ warning: {e}")
@@ -459,6 +460,36 @@ def build_graph_data(pass2_result, mcqs_all=None, pass1_result=None) -> dict:
             "candidates": candidates,
         }
 
+    def _resolve_concept_node(name: str, segment_id: str = "") -> str | None:
+        """Resolve Pass1 relationship names to graph node ids with graceful fallback."""
+        raw_name = str(name or "").strip()
+        if raw_name in concept_nodes:
+            return raw_name
+
+        # If Pass1 remapped the relationship to a segment, trust that segment first.
+        seg_info = seg_lookup.get(str(segment_id or "").strip(), {}) if segment_id else {}
+        seg_candidates = list(seg_info.get("candidates", []) or [])
+        node_id = _best_match(raw_name, seg_candidates) if raw_name else None
+        if node_id:
+            return node_id
+        if len(seg_candidates) == 1:
+            return seg_candidates[0]
+
+        label = str(seg_info.get("label", "") or "").strip()
+        if label in concept_nodes:
+            return label
+
+        # Fuzzy fallback covers small naming drift like "Simple Recurrent Net"
+        # vs "Simple Recurrent Nets (Elman nets)".
+        node_id = _best_match(raw_name, list(concept_nodes.keys()))
+        if node_id:
+            return node_id
+
+        parent = str(seg_info.get("parent", "") or "").strip()
+        if parent in concept_nodes:
+            return parent
+        return None
+
     # Group KUs by concept, but keep the full KU payload for the detail pane.
     ku_index: dict[str, dict] = {}
     node_ku_map: dict[str, list[dict]] = {}
@@ -522,17 +553,24 @@ def build_graph_data(pass2_result, mcqs_all=None, pass1_result=None) -> dict:
     seen_edges.update((e["source"], e["target"]) for e in hierarchy_edges)
 
     # Cross edges are kept at concept level only, to reduce clutter.
-    node_level = {nid: node["level"] for nid, node in concept_nodes.items()}
+    # Use the same forgiving name resolution as the backend graph builder so
+    # relationship edges do not disappear due to minor Pass1 naming drift.
     for rel in relationships:
-        src = rel.get("from_concept", "")
-        tgt = rel.get("to_concept", "")
+        src = _resolve_concept_node(rel.get("from_concept", ""), rel.get("from_segment", ""))
+        tgt = _resolve_concept_node(rel.get("to_concept", ""), rel.get("to_segment", ""))
         relation = rel.get("relation", "RELATED_TO")
-        if not src or not tgt or src not in concept_nodes or tgt not in concept_nodes:
-            continue
-        if node_level.get(src) != node_level.get(tgt):
+        if not src or not tgt or src == tgt or src not in concept_nodes or tgt not in concept_nodes:
             continue
         key = (min(src, tgt), max(src, tgt))
         if key in seen_edges:
+            # Keep the hierarchy edge but make it visibly meaningful when the
+            # same pair also has a relationship, e.g. RNN -> LSTM EXTENDS.
+            for e in edges:
+                if (min(e["source"], e["target"]), max(e["source"], e["target"])) == key:
+                    e["relation"] = relation
+                    e["edge_type"] = "cross"
+                    e["has_cross_mcq"] = False
+                    break
             continue
         seen_edges.add(key)
         edges.append({
@@ -875,6 +913,71 @@ _GRAPH_BLOCKS_JS_V2 = """
     svg.setAttribute("preserveAspectRatio", "xMidYMid meet");
   }
 
+  function _setView(root, x, y, w, h) {
+    const svg = root && root.querySelector("#ku-svg");
+    if (!svg) return;
+    root._kuView = { x, y, w, h };
+    svg.setAttribute("viewBox", [x, y, w, h].join(" "));
+  }
+
+  function _fitView(root, G) {
+    const svg = root && root.querySelector("#ku-svg");
+    if (!svg || !G || !G.nodes || !G.nodes.length) return;
+    const xs = G.nodes.map(n => Number(n.x || 0));
+    const ys = G.nodes.map(n => Number(n.y || 0));
+    const pad = 110;
+    const minX = Math.min(...xs) - pad;
+    const maxX = Math.max(...xs) + pad;
+    const minY = Math.min(...ys) - pad;
+    const maxY = Math.max(...ys) + pad;
+    const baseW = Number(root._kuBaseW || svg.clientWidth || 900);
+    const baseH = Number(root._kuBaseH || svg.clientHeight || 620);
+    let vx = minX;
+    let vy = minY;
+    let vw = Math.max(260, maxX - minX);
+    let vh = Math.max(220, maxY - minY);
+    const graphRatio = vw / vh;
+    const screenRatio = baseW / baseH;
+    if (graphRatio > screenRatio) {
+      const nextH = vw / screenRatio;
+      vy -= (nextH - vh) / 2;
+      vh = nextH;
+    } else {
+      const nextW = vh * screenRatio;
+      vx -= (nextW - vw) / 2;
+      vw = nextW;
+    }
+    _setView(root, vx, vy, vw, vh);
+  }
+
+  function _zoomView(root, factor) {
+    const v = root && root._kuView;
+    if (!v) return;
+    const nw = Math.max(180, v.w * factor);
+    const nh = Math.max(150, v.h * factor);
+    _setView(root, v.x + (v.w - nw) / 2, v.y + (v.h - nh) / 2, nw, nh);
+  }
+
+  function _wireGraphControls(root) {
+    if (!root || root._controlsWired) return;
+    root._controlsWired = true;
+    root.addEventListener("click", ev => {
+      const btn = ev.target.closest && ev.target.closest("[data-graph-action]");
+      if (!btn || !root.contains(btn)) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const action = btn.getAttribute("data-graph-action");
+      if (action === "fit") _fitView(root, root._lastGraphObj);
+      if (action === "in") _zoomView(root, 0.78);
+      if (action === "out") _zoomView(root, 1.28);
+      if (action === "expand") {
+        root.classList.toggle("ku-expanded");
+        btn.textContent = root.classList.contains("ku-expanded") ? "Close" : "Fullscreen";
+        setTimeout(() => root._lastGraphObj && _render(root._lastGraphObj), 80);
+      }
+    });
+  }
+
   function _clearNode(node) {
     while (node && node.firstChild) node.removeChild(node.firstChild);
   }
@@ -888,13 +991,19 @@ _GRAPH_BLOCKS_JS_V2 = """
     const nodes = root.querySelector("#ku-nodes");
     const fb = root.querySelector("#ku-fb");
     if (!svg || !links || !nodes || !fb) return;
+    _wireGraphControls(root);
 
     _clearNode(links);
     _clearNode(nodes);
     _clearNode(fb);
 
     const W = Math.max(root.clientWidth || 800, 640);
-    const H = 540;
+    const H = root.classList.contains("ku-expanded")
+      ? Math.max(window.innerHeight - 112, 620)
+      : 620;
+    root._kuBaseW = W;
+    root._kuBaseH = H;
+    root._lastGraphObj = G;
     _setSvgSize(svg, W, H);
 
     const nodeMap = {};
@@ -1011,7 +1120,7 @@ _GRAPH_BLOCKS_JS_V2 = """
       const hit = document.createElementNS("http://www.w3.org/2000/svg", "circle");
       hit.setAttribute("cx", n.x);
       hit.setAttribute("cy", n.y);
-      hit.setAttribute("r", n.level === "L1" ? "28" : "22");
+      hit.setAttribute("r", n.level === "L1" ? "38" : "30");
       hit.setAttribute("fill", "transparent");
       hit.setAttribute("stroke", "transparent");
       hit.setAttribute("pointer-events", "all");
@@ -1020,11 +1129,11 @@ _GRAPH_BLOCKS_JS_V2 = """
       const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
       circle.setAttribute("cx", n.x);
       circle.setAttribute("cy", n.y);
-      circle.setAttribute("r", n.level === "L1" ? "19" : "12");
+      circle.setAttribute("r", n.level === "L1" ? "24" : "15");
       circle.setAttribute("fill", colorMap[n.id] || "#94a3b8");
       circle.setAttribute("fill-opacity", n.level === "L1" ? "0.95" : "0.9");
-      circle.setAttribute("stroke", "rgba(255,255,255,0)");
-      circle.setAttribute("stroke-width", "0");
+      circle.setAttribute("stroke", n.level === "L1" ? "rgba(255,255,255,.28)" : "rgba(255,255,255,.18)");
+      circle.setAttribute("stroke-width", n.level === "L1" ? "2" : "1.4");
       g.appendChild(circle);
 
       if (n.level === "L1" && n.ku_count) {
@@ -1042,12 +1151,16 @@ _GRAPH_BLOCKS_JS_V2 = """
 
       const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
       label.setAttribute("x", n.x);
-      label.setAttribute("y", n.y + (n.level === "L1" ? 32 : 24));
+      label.setAttribute("y", n.y + (n.level === "L1" ? 40 : 31));
       label.setAttribute("text-anchor", "middle");
-      label.setAttribute("font-size", n.level === "L1" ? "12" : "10");
-      label.setAttribute("font-weight", n.level === "L1" ? "600" : "400");
+      label.setAttribute("font-size", n.level === "L1" ? "15" : "12");
+      label.setAttribute("font-weight", n.level === "L1" ? "800" : "600");
       label.setAttribute("fill", n.level === "L1" ? "#fecaca" : "#bfdbfe");
       label.setAttribute("pointer-events", "none");
+      label.setAttribute("paint-order", "stroke");
+      label.setAttribute("stroke", "#111827");
+      label.setAttribute("stroke-width", n.level === "L1" ? "4" : "3");
+      label.setAttribute("stroke-linejoin", "round");
       label.textContent = n.label.length > (n.level === "L1" ? 24 : 18)
         ? n.label.slice(0, n.level === "L1" ? 23 : 17) + "…"
         : n.label;
@@ -1057,6 +1170,7 @@ _GRAPH_BLOCKS_JS_V2 = """
     });
 
     highlight(selectedId);
+    _fitView(root, G);
   }
 
   window.initKUGraph = function(G) {
@@ -1115,17 +1229,31 @@ def _build_graph_html_container(graph_data=None) -> str:
     return f"""<div id="ku-graph-root"{data_attr}
   style="width:100%;background:#1e1e2e;border-radius:10px;overflow:hidden;position:relative;user-select:none">
 <style>
-#ku-graph-root svg{{width:100%;height:540px;display:block}}
+#ku-graph-root svg{{width:100%;height:620px;display:block}}
 #ku-graph-root .node-lbl{{font-size:10px;fill:#94a3b8;pointer-events:none}}
 .ku-tip{{position:absolute;background:#2d2d3d;border:1px solid #555;border-radius:8px;
   padding:8px 12px;font-size:12px;color:#e5e7eb;pointer-events:none;max-width:240px;
   z-index:50;display:none;line-height:1.5}}
+.ku-graph-toolbar{{display:flex;gap:8px;align-items:center;justify-content:flex-end;
+  padding:8px 12px;background:#111827;border-bottom:1px solid #2d2d3d}}
+.ku-graph-tool{{padding:5px 10px;border-radius:9px;border:1px solid #374151;
+  background:#1f2937;color:#dbeafe;font-size:12px;cursor:pointer;font-family:inherit}}
+.ku-graph-tool:hover{{border-color:#60a5fa;color:#fff;background:#263244}}
+#ku-graph-root.ku-expanded{{position:fixed!important;inset:18px!important;z-index:9999!important;
+  border:1px solid #475569;box-shadow:0 24px 80px rgba(0,0,0,.55)}}
+#ku-graph-root.ku-expanded svg{{height:calc(100vh - 112px)}}
 #ku-fb{{display:flex;flex-wrap:wrap;gap:6px;padding:8px 12px;
   background:#161622;border-bottom:1px solid #2d2d3d}}
 .fb-btn{{padding:3px 10px;border-radius:10px;border:1.5px solid;background:transparent;
   cursor:pointer;font-size:11px;transition:opacity .2s;font-family:inherit}}
 .fb-btn.off{{opacity:.28}}
 </style>
+<div class="ku-graph-toolbar">
+  <button type="button" class="ku-graph-tool" data-graph-action="fit">Fit</button>
+  <button type="button" class="ku-graph-tool" data-graph-action="in">+</button>
+  <button type="button" class="ku-graph-tool" data-graph-action="out">-</button>
+  <button type="button" class="ku-graph-tool" data-graph-action="expand">Fullscreen</button>
+</div>
 <div id="ku-fb"></div>
     <svg id="ku-svg">
   <defs>
@@ -1161,6 +1289,16 @@ class _Pass2Stub:
         self.all_kus: list[dict] = []
         self.ku_map: dict[str, dict] = {}
         self.concept_kus: dict[str, list[dict]] = {}
+
+        def _add_concept_ku(concept_id: str, ku_node: dict) -> None:
+            concept_id = str(concept_id or "").strip()
+            ku_id = str(ku_node.get("ku_id", "") or "").strip()
+            if not concept_id or not ku_id:
+                return
+            bucket = self.concept_kus.setdefault(concept_id, [])
+            if all(existing.get("ku_id") != ku_id for existing in bucket):
+                bucket.append(ku_node)
+
         for n in raw_kus:
             node = dict(n)
             node.setdefault("ku_id", node.get("id", ""))
@@ -1169,7 +1307,9 @@ class _Pass2Stub:
             self.all_kus.append(node)
             if node["ku_id"]:
                 self.ku_map[node["ku_id"]] = node
-            self.concept_kus.setdefault(node.get("concept", ""), []).append(node)
+            _add_concept_ku(node.get("ui_node_id", ""), node)
+            _add_concept_ku(node.get("owner_concept", ""), node)
+            _add_concept_ku(node.get("concept", ""), node)
 
         self.graph: dict[str, list[str]] = {k: list(v) for k, v in (graph_data.get("ku_graph", {}) or {}).items()}
         self.edge_types: dict = {}
@@ -1324,9 +1464,11 @@ def _render_mcq_block(title: str, mcq, edge_color: str = "#4b5563") -> str:
 def _render_concept_panel(d: dict, pass2_result, mcqs_all=None) -> str:
     concept = d.get("id", "")
     info = getattr(pass2_result, "concepts", {}).get(concept, {}) or {}
-    kus = list(getattr(pass2_result, "concept_kus", {}).get(concept, []))
-    if not kus and info.get("kus"):
-        kus = list(info.get("kus", []))
+    # Prefer the serialized node payload because it already uses ui_node_id.
+    # Falling back to concept_kus keeps older graph_data payloads working.
+    kus = list(info.get("kus", []) or [])
+    if not kus:
+        kus = list(getattr(pass2_result, "concept_kus", {}).get(concept, []))
 
     color = info.get("color", "#60a5fa")
     level = info.get("level", "L2")
@@ -1363,6 +1505,21 @@ def _render_concept_panel(d: dict, pass2_result, mcqs_all=None) -> str:
 </div>"""
 
 
+def _visible_ku_relations(ku_id: str, pass2_result) -> list[tuple[str, str]]:
+    """Relationships shown in the UI. Hide auto-generated sibling edges."""
+    visible: list[tuple[str, str]] = []
+    for nid in getattr(pass2_result, "graph", {}).get(ku_id, []):
+        rel = (
+            pass2_result.edge_types.get((ku_id, nid))
+            or pass2_result.edge_types.get((nid, ku_id))
+            or "RELATED_TO"
+        )
+        if rel == "SIBLING_OF":
+            continue
+        visible.append((nid, rel))
+    return visible
+
+
 def _render_ku_panel(ku: dict, pass2_result, mcqs_all=None) -> str:
     ku_map = getattr(pass2_result, "ku_map", {}) or {k["ku_id"]: k for k in pass2_result.all_kus}
     color = _TYPE_COLORS.get(ku["type"], "#888")
@@ -1371,13 +1528,12 @@ def _render_ku_panel(ku: dict, pass2_result, mcqs_all=None) -> str:
     bloom = ku.get("bloom_level") or ""
     difficulty = ku.get("difficulty") or ""
 
-    neighbors = pass2_result.graph.get(ku["ku_id"], [])
+    neighbors = _visible_ku_relations(ku["ku_id"], pass2_result)
     related_cards = ""
-    for nid in neighbors:
+    for nid, rel in neighbors:
         other = ku_map.get(nid)
         if not other:
             continue
-        rel = pass2_result.edge_types.get((ku["ku_id"], nid)) or pass2_result.edge_types.get((nid, ku["ku_id"])) or "RELATED_TO"
         rel_color = (_EDGE_STYLE.get(rel) or {}).get("color", "#4b5563")
         rel_label = (_EDGE_STYLE.get(rel) or {}).get("label", rel)
         other_pages = _fmt_pages(other.get("source_pages", []))
@@ -1438,13 +1594,12 @@ def _render_ku_panel_v2(ku: dict, pass2_result, mcqs_all=None) -> str:
     practice_bloom = ku.get("bloom_level") or "understand"
     difficulty_badge = ku.get("difficulty") or "medium"
 
-    neighbors = pass2_result.graph.get(ku["ku_id"], [])
+    neighbors = _visible_ku_relations(ku["ku_id"], pass2_result)
     related_cards = ""
-    for nid in neighbors:
+    for nid, rel in neighbors:
         other = ku_map.get(nid)
         if not other:
             continue
-        rel = pass2_result.edge_types.get((ku["ku_id"], nid)) or pass2_result.edge_types.get((nid, ku["ku_id"])) or "RELATED_TO"
         rel_color = (_EDGE_STYLE.get(rel) or {}).get("color", "#4b5563")
         other_pages = _fmt_pages(other.get("source_pages", []))
         related_cards += f"""
@@ -1628,11 +1783,11 @@ def render_ku_detail(click_json: str, pass2_result, mcqs_all=None) -> str:
     color    = _TYPE_COLORS.get(ku["type"], "#888")
     icon     = _TYPE_ICONS.get(ku["type"], "📖")
     pages_s  = _fmt_pages(ku.get("source_pages", []))
-    neighbors= pass2_result.graph.get(node_id, [])
+    neighbors= _visible_ku_relations(node_id, pass2_result)
     nb_chips = "".join(
         f'<span style="padding:3px 9px;border-radius:8px;background:#252535;border:1px solid #374151;'
         f'color:#9ca3af;font-size:12px">{ku_map[n]["concept"]}</span>'
-        for n in neighbors if n in ku_map
+        for n, _rel in neighbors if n in ku_map
     )
 
     # find single MCQ for this KU

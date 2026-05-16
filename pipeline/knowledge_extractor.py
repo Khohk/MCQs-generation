@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pipeline.schemas import KUItem, HORIZONTAL_RELATIONS
+from pipeline.schemas import KUItem, HORIZONTAL_RELATIONS, STRUCTURAL_RELATIONS
 from pydantic import ValidationError
 
 
@@ -382,9 +382,23 @@ def build_ku_graph_with_cross(
     edge_types: dict[tuple[str, str], str] = {}
     ku_by_id:   dict[str, dict]            = {ku["ku_id"]: ku for ku in all_kus}
     _PROMINENCE_ORDER = {"primary": 0, "supporting": 1, "peripheral": 2}
+    _PROMINENCE_BONUS = {"primary": 15, "supporting": 6, "peripheral": 0}
+    _RELATION_TYPE_BONUS: dict[str, dict[str, int]] = {
+        # For broad concept-level links, definition/mechanism usually represent
+        # the concept better than a narrow failure mode.
+        "CONTRASTS_WITH": {"definition": 24, "mechanism": 20, "trade_off": 16, "failure_mode": 12},
+        "ALTERNATIVE_TO": {"definition": 24, "mechanism": 20, "procedure": 16, "application": 12},
+        "SIMILAR_TO": {"definition": 22, "mechanism": 18, "procedure": 10, "application": 8},
+        "SIBLING_OF": {"definition": 22, "mechanism": 18, "procedure": 10, "application": 8},
+        "EXTENDS": {"definition": 22, "mechanism": 18, "procedure": 10, "application": 8},
+        "ENABLES": {"mechanism": 20, "procedure": 18, "definition": 14, "application": 12},
+        "APPLIES_TO": {"application": 22, "procedure": 20, "mechanism": 14, "definition": 12},
+    }
 
     def _tokens(text: str) -> set[str]:
-        return set(re.findall(r"\w+", _normalize(text)))
+        def _depl(t: str) -> str:
+            return t.rstrip("s") if len(t) > 3 else t
+        return {_depl(t) for t in re.findall(r"\w+", _normalize(text)) if t}
 
     def _same_concept(a: str, b: str) -> bool:
         ka = ku_by_id.get(a, {})
@@ -397,60 +411,92 @@ def build_ku_graph_with_cross(
         cb = _normalize(kb.get("concept", ""))
         return bool(ca and cb and ca == cb)
 
-    def _concept_match_score(kid: str, target_name: str) -> int:
-        """Lower is better; prefer the exact UI owner before broad parents."""
-        if not target_name:
-            return 20
+    def _text_match_score(value: str, target_name: str, exact: int, subset: int, overlap_base: int) -> int:
+        value_norm = _normalize(str(value or ""))
+        target_norm = _normalize(str(target_name or ""))
+        if not value_norm or not target_norm:
+            return 0
+        if value_norm == target_norm:
+            return exact
+
+        vt = _tokens(value_norm)
+        tt = _tokens(target_norm)
+        if not vt or not tt:
+            return 0
+        overlap = len(vt & tt)
+        if not overlap:
+            return 0
+        if vt <= tt or tt <= vt:
+            return subset + min(12, overlap * 3)
+        return overlap_base + min(18, overlap * 4)
+
+    def _local_match_score(kid: str, target_name: str) -> int:
         ku = ku_by_id.get(kid, {})
-        target = _normalize(target_name)
-        if not target:
-            return 20
+        return max(
+            _text_match_score(ku.get("concept", ""), target_name, 120, 94, 44),
+            _text_match_score(ku.get("local_concept", ""), target_name, 116, 90, 42),
+        )
 
-        fields = [
-            ("owner_concept", 0),
-            ("concept", 1),
-            ("local_concept", 2),
-            ("parent_l2", 3),
-            # parent_l1 is intentionally weaker: it is useful for true L1
-            # lookups, but should not beat a specific L2/local match.
-            ("parent_l1", 8),
-        ]
-        exact_scores = [
-            base for key, base in fields
-            if _normalize(str(ku.get(key, "") or "")) == target
-        ]
-        if exact_scores:
-            return min(exact_scores)
+    def _owner_match_score(kid: str, target_name: str) -> int:
+        ku = ku_by_id.get(kid, {})
+        return max(
+            _text_match_score(ku.get("owner_concept", ""), target_name, 35, 26, 8),
+            _text_match_score(ku.get("parent_l2", ""), target_name, 30, 22, 7),
+            # parent_l1 is intentionally weak. It helps true L1 lookup but
+            # should not make every child KU look like the L1 representative.
+            _text_match_score(ku.get("parent_l1", ""), target_name, 14, 10, 4),
+        )
 
-        tt = _tokens(target)
-        best = 20
-        for key, base in fields:
-            value = _normalize(str(ku.get(key, "") or ""))
-            vt = _tokens(value)
-            if not vt or not tt:
-                continue
-            if vt <= tt or tt <= vt:
-                best = min(best, base + 4)
-                continue
-            overlap = len(vt & tt)
-            if overlap:
-                best = min(best, base + 10 - overlap)
-        return best
+    def _evidence_score(kid: str) -> int:
+        words = re.findall(r"\w+", str(ku_by_id.get(kid, {}).get("verbatim_evidence", "")))
+        if len(words) < 6:
+            return -5
+        return min(8, len(words) // 10)
+
+    def _type_bonus(kid: str, relation: str) -> int:
+        ku_type = ku_by_id.get(kid, {}).get("type", "")
+        return (_RELATION_TYPE_BONUS.get(relation, {}) or {}).get(ku_type, 0)
+
+    def _representative_score(kid: str, target_name: str = "", relation: str = "") -> tuple[int, int, int]:
+        """Higher is better. Concept/local match dominates all tie-breakers."""
+        local_score = _local_match_score(kid, target_name)
+        owner_score = _owner_match_score(kid, target_name)
+        prominence = _PROMINENCE_BONUS.get(ku_by_id.get(kid, {}).get("prominence", "peripheral"), 0)
+        centrality = min(len(graph.get(kid, [])), 3) * 2
+        fallback_penalty = 0
+        if target_name and local_score == 0 and owner_score > 0:
+            # KU belongs to the requested owner, but its precise tested concept
+            # does not resemble the target. Keep it as fallback, not as first pick.
+            fallback_penalty = -18
+        elif target_name and local_score == 0 and owner_score == 0:
+            fallback_penalty = -40
+
+        total = (
+            local_score
+            + owner_score
+            + _type_bonus(kid, relation)
+            + prominence
+            + _evidence_score(kid)
+            + centrality
+            + fallback_penalty
+        )
+        return total, local_score, owner_score
+
+    def _concept_match_score(kid: str, target_name: str) -> int:
+        """Compatibility helper: higher is better."""
+        if not target_name:
+            return 0
+        return _representative_score(kid, target_name)[0]
 
     def _rank_ids(ku_ids: list[str], target_name: str = "", relation: str = "") -> list[str]:
-        target_types = RELATION_TO_KU_TYPES.get(relation, [])
-
-        def _type_score(kid: str) -> int:
-            ku_type = ku_by_id.get(kid, {}).get("type", "")
-            return target_types.index(ku_type) if ku_type in target_types else len(target_types) + 1
-
         seen: set[str] = set()
         unique = [kid for kid in ku_ids if kid in ku_by_id and not (kid in seen or seen.add(kid))]
         return sorted(
             unique,
             key=lambda kid: (
-                _concept_match_score(kid, target_name),
-                _type_score(kid),
+                -_representative_score(kid, target_name, relation)[0],
+                -_representative_score(kid, target_name, relation)[1],
+                -_representative_score(kid, target_name, relation)[2],
                 _PROMINENCE_ORDER.get(ku_by_id.get(kid, {}).get("prominence", "peripheral"), 2),
                 kid,
             ),
@@ -472,13 +518,45 @@ def build_ku_graph_with_cross(
             edge_types[key] = relation
         return True
 
-    def _pick_primary(ku_ids: list[str]) -> str | None:
-        return min(
-            ku_ids,
-            key=lambda kid: _PROMINENCE_ORDER.get(
-                ku_by_id.get(kid, {}).get("prominence", "peripheral"), 2),
-            default=None,
-        )
+    def _pick_primary(ku_ids: list[str], target_name: str = "", relation: str = "") -> str | None:
+        ranked = _rank_ids(ku_ids, target_name, relation)
+        return ranked[0] if ranked else None
+
+    def _ku_type(kid: str) -> str:
+        return str(ku_by_id.get(kid, {}).get("type", "") or "")
+
+    def _mode_bonus(fid: str, tid: str, relation: str, mode: str) -> int | None:
+        ft, tt = _ku_type(fid), _ku_type(tid)
+        pair = {ft, tt}
+        broad = {"definition", "mechanism", "trade_off"}
+        process = {"procedure", "application", "mechanism"}
+
+        if mode == "compare":
+            return 90 if ft in broad and tt in broad else None
+        if mode == "limitation":
+            return 78 if "failure_mode" in pair and (pair - {"failure_mode"}) & {"definition", "mechanism", "procedure"} else None
+        if mode == "same_type":
+            return 84 if ft == tt else None
+        if mode == "approach":
+            return 76 if ft in {"definition", "procedure", "mechanism", "application"} and tt in {"definition", "procedure", "mechanism", "application"} else None
+        if mode == "application":
+            return 76 if ft in process and tt in process else None
+        if mode == "builds_on":
+            return 72 if ft in {"definition", "mechanism"} and tt in {"definition", "mechanism"} else None
+        return None
+
+    def _relation_modes(relation: str) -> tuple[list[str], int]:
+        if relation == "CONTRASTS_WITH":
+            return ["compare", "limitation"], 2
+        if relation == "ALTERNATIVE_TO":
+            return ["same_type", "approach", "limitation"], 2
+        if relation in {"SIMILAR_TO", "SIBLING_OF"}:
+            return ["same_type", "compare"], 1
+        if relation == "APPLIES_TO":
+            return ["application", "approach"], 1
+        if relation in {"EXTENDS", "ENABLES"}:
+            return ["builds_on", "application"], 1
+        return ["compare", "same_type"], 1
 
     def _select_endpoints(
         from_ids: list[str],
@@ -487,19 +565,64 @@ def build_ku_graph_with_cross(
         from_name: str = "",
         to_name: str = "",
     ) -> list[tuple[str, str]]:
-        """Pick representative endpoints instead of a cartesian product."""
-        target_types = RELATION_TO_KU_TYPES.get(relation, ["definition"])
-        f_cands = [k for k in from_ids if ku_by_id.get(k, {}).get("type") in target_types]
-        t_cands = [k for k in to_ids   if ku_by_id.get(k, {}).get("type") in target_types]
-        if not f_cands: f_cands = from_ids
-        if not t_cands: t_cands = to_ids
-        f_ranked = _rank_ids(f_cands, from_name, relation)
-        t_ranked = _rank_ids(t_cands, to_name, relation)
-        for f in f_ranked[:3]:
-            for t in t_ranked[:3]:
-                if f != t and not _same_concept(f, t):
-                    return [(f, t)]
-        return []
+        """Pick representative endpoint pairs by relation/type mode."""
+        f_ranked = _rank_ids(from_ids, from_name, relation)
+        t_ranked = _rank_ids(to_ids, to_name, relation)
+        modes, max_pairs = _relation_modes(relation)
+        selected: list[tuple[str, str]] = []
+        selected_keys: set[tuple[str, str]] = set()
+
+        def _best_for_mode(mode: str) -> tuple[str, str] | None:
+            best_pair: tuple[str, str] | None = None
+            best_score = -10**9
+            for f in f_ranked[:6]:
+                for t in t_ranked[:6]:
+                    if f == t or _same_concept(f, t):
+                        continue
+                    key = (min(f, t), max(f, t))
+                    if key in selected_keys:
+                        continue
+                    bonus = _mode_bonus(f, t, relation, mode)
+                    if bonus is None:
+                        continue
+                    score = (
+                        _representative_score(f, from_name, relation)[0]
+                        + _representative_score(t, to_name, relation)[0]
+                        + bonus
+                    )
+                    if score > best_score:
+                        best_score = score
+                        best_pair = (f, t)
+            return best_pair
+
+        for mode in modes:
+            pair = _best_for_mode(mode)
+            if not pair:
+                continue
+            key = (min(pair[0], pair[1]), max(pair[0], pair[1]))
+            selected.append(pair)
+            selected_keys.add(key)
+            if len(selected) >= max_pairs:
+                return selected
+
+        # Fallback keeps one reasonable pair if no typed mode matched.
+        if not selected:
+            best_pair: tuple[str, str] | None = None
+            best_score = -10**9
+            for f in f_ranked[:4]:
+                for t in t_ranked[:4]:
+                    if f == t or _same_concept(f, t):
+                        continue
+                    score = (
+                        _representative_score(f, from_name, relation)[0]
+                        + _representative_score(t, to_name, relation)[0]
+                    )
+                    if score > best_score:
+                        best_score = score
+                        best_pair = (f, t)
+            if best_pair:
+                selected.append(best_pair)
+        return selected
 
     concept_index: dict[str, list[str]] = {}
     for ku in all_kus:
@@ -667,8 +790,8 @@ def build_ku_graph_with_cross(
                 if _has_seq_rel(children[i], children[j]):
                     _log(f"  [graph] sibling skip (sequential): {children[i]} ↔ {children[j]}")
                     continue
-                pa = _pick_primary(child_ku_groups[i])
-                pb = _pick_primary(child_ku_groups[j])
+                pa = _pick_primary(child_ku_groups[i], children[i], "SIBLING_OF")
+                pb = _pick_primary(child_ku_groups[j], children[j], "SIBLING_OF")
                 if not (pa and pb) or pa == pb:
                     continue
                 if not _owner_key(pa) or _owner_key(pa) == _owner_key(pb):
@@ -716,10 +839,14 @@ def get_distractors(
     """
     Select up to n distractor KUs for an anchor KU.
 
-    Tier 1a: SIBLING_OF, same type as anchor
-    Tier 1b: SIBLING_OF, different type (fallback within siblings)
-    Tier 2 : other horizontal (CONTRASTS_WITH, ALTERNATIVE_TO, SIMILAR_TO)
-    Tier 3 : same type, non-hub, global fallback
+    Candidates are scored instead of appended bucket-by-bucket so we can keep
+    provenance and prefer plausible-but-distinct distractors:
+      - explicit horizontal edges first
+      - same owner_concept + same type
+      - same parent_l1 + same type
+      - same parent_l1 + related type
+      - global same type
+      - LLM-generated filler if fewer than three distractors remain
     """
     ku_by_id    = {ku["ku_id"]: ku for ku in all_kus}
     anchor      = ku_by_id.get(anchor_ku_id)
@@ -728,6 +855,8 @@ def get_distractors(
 
     anchor_type    = anchor.get("type")
     anchor_concept = _normalize(anchor.get("concept", ""))
+    anchor_owner   = _normalize(anchor.get("owner_concept") or anchor.get("parent_l2") or "")
+    anchor_l1      = _normalize(anchor.get("parent_l1", ""))
     hub_ids        = get_hub_ids(graph)
 
     def _rel(a: str, b: str) -> str:
@@ -736,31 +865,182 @@ def get_distractors(
     neighbors  = graph.get(anchor_ku_id, [])
     candidates = [nid for nid in neighbors if nid in ku_by_id and nid not in hub_ids]
 
-    tier1a = [nid for nid in candidates
-              if _rel(anchor_ku_id, nid) == "SIBLING_OF"
-              and ku_by_id[nid].get("type") == anchor_type]
-    tier1b = [nid for nid in candidates
-              if _rel(anchor_ku_id, nid) == "SIBLING_OF"
-              and ku_by_id[nid].get("type") != anchor_type]
-    tier2  = [nid for nid in candidates
-              if _rel(anchor_ku_id, nid) in HORIZONTAL_RELATIONS
-              and _rel(anchor_ku_id, nid) != "SIBLING_OF"]
+    def _strong_distractor_edge(nid: str) -> bool:
+        rel = _rel(anchor_ku_id, nid)
+        other_type = ku_by_id[nid].get("type", "")
+        pair = {anchor_type, other_type}
+        if rel in {"CONTRASTS_WITH", "ALTERNATIVE_TO"}:
+            if "failure_mode" in pair and not (pair <= {"failure_mode", "trade_off"}):
+                # Useful for cross-MCQ limitation questions, but usually too
+                # asymmetric to be a strong single-KU distractor.
+                return False
+            return True
+        if rel == "SIMILAR_TO":
+            same_type = other_type == anchor_type
+            same_owner = _same_owner(ku_by_id[nid])
+            same_l1 = _same_l1(ku_by_id[nid])
+            related_type = (
+                pair <= {"definition", "mechanism"}
+                or pair <= {"mechanism", "procedure", "application"}
+                or pair <= {"failure_mode", "trade_off"}
+            )
+            return same_type or ((same_owner or same_l1) and related_type)
+        return False
 
-    pool_ids = tier1a + tier1b + tier2
-    seen     = {anchor_ku_id} | set(pool_ids)
+    def _tokens(text: str) -> set[str]:
+        return {t for t in re.findall(r"\w+", _normalize(text or "")) if len(t) > 2}
 
-    if len(pool_ids) < n:
-        for ku in all_kus:
-            if len(pool_ids) >= n:
-                break
-            kid = ku["ku_id"]
-            if (kid not in seen and kid not in hub_ids
-                    and ku.get("type") == anchor_type
-                    and _normalize(ku.get("concept", "")) != anchor_concept):
-                pool_ids.append(kid)
-                seen.add(kid)
+    anchor_concept_tokens = _tokens(anchor.get("concept", ""))
+    anchor_content_tokens = _tokens(anchor.get("content", ""))
 
-    return [ku_by_id[nid] for nid in pool_ids[:n] if nid in ku_by_id]
+    def _owner_of(ku: dict) -> str:
+        return _normalize(ku.get("owner_concept") or ku.get("parent_l2") or "")
+
+    def _same_owner(ku: dict) -> bool:
+        return bool(anchor_owner and _owner_of(ku) == anchor_owner)
+
+    def _same_l1(ku: dict) -> bool:
+        return bool(anchor_l1 and _normalize(ku.get("parent_l1", "")) == anchor_l1)
+
+    def _related_type_bonus(other_type: str) -> int:
+        if other_type == anchor_type:
+            return 14
+        type_groups = [
+            {"definition", "mechanism"},
+            {"mechanism", "procedure", "application"},
+            {"failure_mode", "trade_off"},
+        ]
+        if any(anchor_type in group and other_type in group for group in type_groups):
+            return 5
+        return -10
+
+    def _overlap_ratio(a: set[str], b: set[str]) -> float:
+        if not a or not b:
+            return 0.0
+        return len(a & b) / max(1, min(len(a), len(b)))
+
+    def _duplicate_or_too_similar_penalty(ku: dict) -> int:
+        """Penalize near-duplicates that differ mostly by wording."""
+        concept_overlap = _overlap_ratio(anchor_concept_tokens, _tokens(ku.get("concept", "")))
+        content_overlap = _overlap_ratio(anchor_content_tokens, _tokens(ku.get("content", "")))
+        penalty = 0
+        if concept_overlap >= 0.90:
+            penalty += 28
+        elif concept_overlap >= 0.70:
+            penalty += 14
+        if content_overlap >= 0.82:
+            penalty += 24
+        elif content_overlap >= 0.68:
+            penalty += 12
+        if _same_owner(ku) and concept_overlap >= 0.65:
+            penalty += 8
+        return penalty
+
+    def _topic_distance_penalty(ku: dict, source: str, rel: str) -> int:
+        """Penalize random-but-same-type fallbacks and structural-only links."""
+        if source == "explicit_horizontal":
+            return 0
+
+        penalty = 0
+        ku_l1 = _normalize(ku.get("parent_l1", ""))
+        if anchor_l1 and ku_l1 and ku_l1 != anchor_l1:
+            penalty += 18
+        if not _same_owner(ku) and not _same_l1(ku):
+            penalty += 12
+        if source == "global_same_type" and anchor_l1 and not _same_l1(ku):
+            penalty += 10
+        if rel in STRUCTURAL_RELATIONS:
+            penalty += 18
+        return penalty
+
+    def _evidence_bonus(ku: dict) -> int:
+        n_words = len(re.findall(r"\w+", str(ku.get("verbatim_evidence", ""))))
+        if n_words < 6:
+            return -4
+        return min(6, n_words // 12)
+
+    scored: dict[str, dict] = {}
+
+    def _add_candidate(kid: str, source: str, base: int, rel: str = "") -> None:
+        if kid == anchor_ku_id or kid in hub_ids or kid not in ku_by_id:
+            return
+        ku = ku_by_id[kid]
+        if _normalize(ku.get("concept", "")) == anchor_concept:
+            return
+
+        score = base
+        score += _related_type_bonus(str(ku.get("type", "") or ""))
+        score += 12 if _same_owner(ku) else 0
+        score += 7 if _same_l1(ku) else 0
+        score += _evidence_bonus(ku)
+        score -= _duplicate_or_too_similar_penalty(ku)
+        score -= _topic_distance_penalty(ku, source, rel)
+
+        if rel in {"CONTRASTS_WITH", "ALTERNATIVE_TO"}:
+            score += 8
+        elif rel == "SIMILAR_TO":
+            score += 3
+
+        prev = scored.get(kid)
+        if not prev or score > prev["score"]:
+            scored[kid] = {
+                "kid": kid,
+                "source": source,
+                "relation": rel,
+                "score": score,
+            }
+
+    for nid in candidates:
+        rel = _rel(anchor_ku_id, nid)
+        other = ku_by_id[nid]
+        if rel == "SIBLING_OF":
+            # SIBLING_OF is auto-generated, so treat it as same-L1 evidence
+            # instead of a strong explicit relation.
+            if other.get("type") == anchor_type and _same_l1(other):
+                _add_candidate(nid, "same_l1_same_type", 72, rel)
+            elif _same_l1(other) and _related_type_bonus(str(other.get("type", "") or "")) > 0:
+                _add_candidate(nid, "same_l1_related_type", 54, rel)
+        elif rel in HORIZONTAL_RELATIONS:
+            if _strong_distractor_edge(nid):
+                _add_candidate(nid, "explicit_horizontal", 108, rel)
+            else:
+                _add_candidate(nid, "same_l1_related_type", 54, rel)
+        elif rel in STRUCTURAL_RELATIONS:
+            _add_candidate(nid, "structural_only_edge", 32, rel)
+
+    for ku in all_kus:
+        kid = ku.get("ku_id", "")
+        if ku.get("type") == anchor_type and _same_owner(ku):
+            _add_candidate(kid, "same_owner_same_type", 82)
+        if ku.get("type") == anchor_type and _same_l1(ku):
+            _add_candidate(kid, "same_l1_same_type", 72)
+        elif _same_l1(ku) and _related_type_bonus(str(ku.get("type", "") or "")) > 0:
+            _add_candidate(kid, "same_l1_related_type", 54)
+        if ku.get("type") == anchor_type:
+            _add_candidate(kid, "global_same_type", 44)
+
+    source_rank = {
+        "explicit_horizontal": 0,
+        "same_owner_same_type": 1,
+        "same_l1_same_type": 2,
+        "same_l1_related_type": 3,
+        "global_same_type": 4,
+        "structural_only_edge": 5,
+    }
+    ranked = sorted(
+        scored.values(),
+        key=lambda item: (-item["score"], source_rank.get(item["source"], 9), item["kid"]),
+    )
+
+    result: list[dict] = []
+    for item in ranked[:n]:
+        ku = dict(ku_by_id[item["kid"]])
+        ku["_distractor_source"] = item["source"]
+        ku["_distractor_relation"] = item["relation"]
+        ku["_distractor_score"] = item["score"]
+        result.append(ku)
+
+    return result
 
 
 # ── Priority score ─────────────────────────────────────────────────────────
@@ -811,11 +1091,13 @@ MAX_EDGES_PER_KU = 4
 _EDGE_PRIO = {
     "CONTRASTS_WITH" : 1,
     "ALTERNATIVE_TO" : 1,
-    "SIMILAR_TO"     : 2,
-    "SIBLING_OF"     : 3,
-    "EXTENDS"        : 4,
-    "APPLIES_TO"     : 4,
-    "ENABLES"        : 5,
+    # Pass1 cross/structural edges carry document-level signal, so keep them
+    # before auto-generated SIBLING_OF edges when the per-KU cap is reached.
+    "EXTENDS"        : 2,
+    "APPLIES_TO"     : 2,
+    "ENABLES"        : 2,
+    "SIMILAR_TO"     : 3,
+    "SIBLING_OF"     : 5,
 }
 
 

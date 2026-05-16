@@ -77,7 +77,8 @@ _CROSS_RELATION_DESC: dict[str, str] = {
 _HORIZONTAL_EDGES = {"CONTRASTS_WITH", "ALTERNATIVE_TO", "SIMILAR_TO", "SIBLING_OF"}
 
 MIN_EVIDENCE_WORDS = 10
-TIER_B_THRESHOLD   = 2
+TIER_A_THRESHOLD   = 3
+TIER_B_THRESHOLD   = TIER_A_THRESHOLD  # Backward-compatible import name.
 MAX_CROSS_MCQS     = 8
 MAX_CROSS_PER_KU   = 2
 
@@ -199,6 +200,8 @@ def _calc_priority(prominence: str, tier: str) -> int:
     Single-KU MCQs  : 1 (primary+A) → 4 (supporting+B)
     Cross-concept   : 5 (horizontal) | 6 (structural)
     """
+    if tier == "C":
+        return 5
     p = 0 if prominence == "primary" else 1
     t = 0 if tier == "A"             else 2
     return 1 + p + t
@@ -206,6 +209,167 @@ def _calc_priority(prominence: str, tier: str) -> int:
 
 def _cross_priority(relation: str) -> int:
     return 5 if relation in _HORIZONTAL_EDGES else 6
+
+
+_CROSS_QUALITY_THRESHOLD: dict[str, int] = {
+    "CONTRASTS_WITH": 35,
+    "ALTERNATIVE_TO": 35,
+    "SIMILAR_TO": 50,
+    "SIBLING_OF": 50,
+    "ENABLES": 35,
+    "EXTENDS": 35,
+    "APPLIES_TO": 35,
+}
+
+
+def _tokens(text: str) -> set[str]:
+    def _depl(t: str) -> str:
+        return t.rstrip("s") if len(t) > 3 else t
+    return {_depl(t) for t in re.findall(r"\w+", _norm_concept_name(text)) if t}
+
+
+def _field_match(value: str, target: str) -> bool:
+    vt = _tokens(value)
+    tt = _tokens(target)
+    return bool(vt and tt and (vt <= tt or tt <= vt or len(vt & tt) >= 2))
+
+
+def _owner_name(ku: dict) -> str:
+    return _norm_concept_name(ku.get("owner_concept") or ku.get("parent_l2") or "")
+
+
+def _is_broad_representative(ku: dict) -> bool:
+    """True when the KU concept looks representative of its owner, not a narrow child."""
+    concept = ku.get("concept", "")
+    local = ku.get("local_concept", "")
+    owner = ku.get("owner_concept") or ku.get("parent_l2") or ""
+    return (
+        _field_match(concept, owner)
+        or _field_match(local, owner)
+        or ku.get("type") in {"definition", "mechanism", "trade_off"}
+    )
+
+
+def _cross_question_mode(ku_a: dict, ku_b: dict, relation: str) -> tuple[str, str]:
+    type_a = ku_a.get("type", "")
+    type_b = ku_b.get("type", "")
+    pair = {type_a, type_b}
+
+    if relation in {"CONTRASTS_WITH", "ALTERNATIVE_TO"} and "failure_mode" in pair:
+        return (
+            "limitation",
+            "Ask how one concept's mechanism/approach relates to a limitation, risk, or failure mode. Do not force a direct A-vs-B contrast.",
+        )
+    if relation == "ALTERNATIVE_TO":
+        return (
+            "alternative",
+            "Ask the learner to distinguish when one approach or procedure is more appropriate than the other.",
+        )
+    if relation == "CONTRASTS_WITH":
+        return (
+            "compare",
+            "Ask for the key conceptual difference or trade-off between the two concepts.",
+        )
+    if relation in {"SIBLING_OF", "SIMILAR_TO"}:
+        return (
+            "distinguish",
+            "Ask the learner to distinguish two related concepts that are easy to confuse.",
+        )
+    if relation == "APPLIES_TO":
+        return (
+            "application",
+            "Ask how one concept is used within, or applied to, the other concept.",
+        )
+    if relation in {"EXTENDS", "ENABLES"}:
+        return (
+            "builds_on",
+            "Ask how one concept builds on, enables, or makes the other concept possible.",
+        )
+    return (
+        "connection",
+        "Ask about the meaningful connection between the two concepts.",
+    )
+
+
+def _cross_edge_quality(ku_a: dict, ku_b: dict, relation: str) -> tuple[int, str]:
+    """
+    Heuristic gate before spending an LLM call on cross-MCQ generation.
+    The goal is not to prove correctness, just to reject obviously weak
+    representative pairs such as mechanism-vs-random failure-mode.
+    """
+    type_a = ku_a.get("type", "")
+    type_b = ku_b.get("type", "")
+    owner_a = _owner_name(ku_a)
+    owner_b = _owner_name(ku_b)
+    l1_a = _norm_concept_name(ku_a.get("parent_l1", ""))
+    l1_b = _norm_concept_name(ku_b.get("parent_l1", ""))
+
+    score = 0
+    reasons: list[str] = []
+
+    if owner_a and owner_b and owner_a != owner_b:
+        score += 15
+        reasons.append("different-owner")
+    if l1_a and l1_b and l1_a == l1_b:
+        score += 10
+        reasons.append("same-l1")
+    if ku_a.get("prominence") == "primary":
+        score += 6
+    if ku_b.get("prominence") == "primary":
+        score += 6
+
+    broad_a = _is_broad_representative(ku_a)
+    broad_b = _is_broad_representative(ku_b)
+    if broad_a:
+        score += 10
+    if broad_b:
+        score += 10
+
+    if relation in {"CONTRASTS_WITH", "ALTERNATIVE_TO"}:
+        score += 20
+        if type_a in {"definition", "mechanism", "trade_off"} and type_b in {"definition", "mechanism", "trade_off"}:
+            score += 15
+            reasons.append("comparable-types")
+        if "failure_mode" in {type_a, type_b}:
+            score += 12
+            reasons.append("limitation-mode")
+        if not (broad_a and broad_b):
+            score -= 4
+            reasons.append("weak-representative")
+    elif relation == "SIBLING_OF":
+        score += 10
+        if l1_a and l1_a == l1_b and owner_a and owner_b and owner_a != owner_b:
+            score += 25
+            reasons.append("true-sibling")
+        if type_a == type_b:
+            score += 15
+            reasons.append("same-type")
+    elif relation == "SIMILAR_TO":
+        score += 12
+        if type_a == type_b:
+            score += 15
+            reasons.append("same-type")
+        if l1_a and l1_a == l1_b:
+            score += 15
+            reasons.append("same-l1")
+    else:
+        score += 18
+        if owner_a != owner_b:
+            score += 10
+        if type_a in {"definition", "mechanism", "procedure", "application"}:
+            score += 6
+        if type_b in {"definition", "mechanism", "procedure", "application"}:
+            score += 6
+
+    return score, ",".join(reasons) or "base"
+
+
+def _tier_for_distractors(n_distractors: int) -> str:
+    if n_distractors >= TIER_A_THRESHOLD:
+        return "A"
+    if n_distractors > 0:
+        return "B"
+    return "C"
 
 
 # ── Step 5: Prompt builders ────────────────────────────────────────────────
@@ -253,7 +417,51 @@ Generate 1 MCQ:
 }}"""
 
 
-def _build_tier_b_prompt(anchor: dict, bloom_level: str, language: str = "en") -> str:
+def _build_tier_b_prompt(anchor: dict, distractors: list[dict], bloom_level: str, language: str = "en") -> str:
+    meta = _BLOOM_META.get(bloom_level, _BLOOM_META["understand"])
+    d_lines = "\n".join(
+        f"{i}. Concept: {d['concept']} | Type: {d['type']}\n"
+        f"   Content: {d['content']}"
+        for i, d in enumerate(distractors, 1)
+    )
+    return f"""## CORRECT ANSWER MATERIAL
+Concept: {anchor['concept']}
+Type: {anchor['type']}
+Correct idea: {anchor['content']}
+Grounding quote: {anchor['verbatim_evidence']}
+
+## PROVIDED WRONG-OPTION ANCHORS
+{d_lines}
+
+{_language_rules(language)}
+
+{_explanation_rules(language)}
+
+## TASK
+Bloom level: {bloom_level}
+Cognitive operation: {meta['description']}
+Stem verbs to use: {meta['verbs']}
+
+Generate 1 MCQ with 3 plausible but incorrect alternatives.
+- The correct option must be a clean reformulation of the Correct idea.
+- Use the provided wrong-option anchors as examples of nearby-but-wrong ideas.
+- Generate any missing wrong options by contrasting the Correct idea against those anchors.
+- Missing wrong options should be plausible misconceptions from the same topic family, not random facts.
+- All wrong options must be semantically relevant and clearly distinct from the correct option.
+- Do NOT mention: "source", "evidence", "distractor", "wrong-option anchor", "KU", "edge", or "prompt".
+- Do NOT reveal that some wrong options were invented.
+
+## OUTPUT (JSON only)
+{{
+  "question": "...",
+  "options": {{"A": "...", "B": "...", "C": "...", "D": "..."}},
+  "answer": "A|B|C|D",
+  "bloom_level": "{bloom_level}",
+  "explanation": "learner-facing explanation with no internal wording"
+}}"""
+
+
+def _build_tier_c_prompt(anchor: dict, bloom_level: str, language: str = "en") -> str:
     meta = _BLOOM_META.get(bloom_level, _BLOOM_META["understand"])
     return f"""## TESTED CONCEPT MATERIAL
 Concept: {anchor['concept']}
@@ -271,8 +479,9 @@ Cognitive operation: {meta['description']}
 Stem verbs to use: {meta['verbs']}
 
 Generate 1 MCQ with 3 plausible but incorrect alternatives.
-Wrong options should represent common misconceptions about {anchor['concept']}.
-Do NOT mention concept names in options.
+- No reliable related concepts are available, so wrong options must be common misconceptions about {anchor['concept']}.
+- Keep wrong options close to the tested concept, not random facts from another topic.
+- Do NOT mention concept names in options.
 
 ## OUTPUT (JSON only)
 {{
@@ -287,6 +496,7 @@ Do NOT mention concept names in options.
 def _build_cross_prompt(ku_a: dict, ku_b: dict, relation: str, bloom_level: str, language: str = "en") -> str:
     meta     = _BLOOM_META.get(bloom_level, _BLOOM_META["analyze"])
     rel_desc = _CROSS_RELATION_DESC.get(relation, "two related concepts")
+    mode, mode_guidance = _cross_question_mode(ku_a, ku_b, relation)
     return f"""## CONCEPT PAIR MATERIAL
 Concept A: {ku_a['concept']} | Type: {ku_a['type']}
 Content A: {ku_a['content']}
@@ -297,6 +507,8 @@ Content B: {ku_b['content']}
 Quote B: {ku_b['verbatim_evidence']}
 
 Relationship: {relation} — {rel_desc}
+Question mode: {mode}
+Mode guidance: {mode_guidance}
 
 ## TASK
 Bloom level: {bloom_level}
@@ -311,7 +523,9 @@ Generate 1 natural MCQ for a learner that tests how the two concepts connect.
 - Use concept names that a learner recognizes: "{ku_a['concept']}" and "{ku_b['concept']}".
 - Do NOT mention internal labels like "{relation}", "KU", "edge", or "relationship type" in the question.
 - The question should sound like a teacher asking about the material, not a graph database.
-- It may ask how one concept supports, is used by, contrasts with, or builds toward the other.
+- Follow the Question mode and Mode guidance above.
+- If the mode is limitation, ask about cause, limitation, consequence, or why one concept motivates/relates to the other; do not ask a forced direct contrast.
+- If the mode is compare, distinguish, or alternative, ask for the key difference or appropriate use case.
 - Correct answer = the best explanation of the connection from the concept descriptions.
 - Wrong answers = plausible but wrong descriptions (wrong direction, wrong mechanism, overclaim, unrelated use).
 - Options must be mutually exclusive and should not all repeat the concept names.
@@ -404,6 +618,56 @@ def _validate_mcq(data: dict) -> bool:
     return True
 
 
+_ANSWER_LETTERS = ("A", "B", "C", "D")
+
+
+def _target_answer_letter(index: int) -> str:
+    """Deterministic A/B/C/D rotation for the final accepted MCQ list."""
+    return _ANSWER_LETTERS[index % len(_ANSWER_LETTERS)]
+
+
+def _remap_explanation_letters(text: str, letter_map: dict[str, str]) -> str:
+    """Remap standalone answer letters in learner-facing explanations."""
+    if not text or not letter_map:
+        return text
+    out = str(text)
+    placeholders: dict[str, str] = {}
+    for src in letter_map:
+        token = f"__MCQ_LETTER_{src}__"
+        placeholders[src] = token
+        out = re.sub(
+            rf"(?<![A-Za-z0-9]){re.escape(src)}(?![A-Za-z0-9])",
+            token,
+            out,
+        )
+    for src, token in placeholders.items():
+        out = out.replace(token, letter_map[src])
+    return out
+
+
+def _rebalance_answer_slot(data: dict, target_letter: str) -> dict:
+    """
+    Move the correct option to target_letter by swapping option texts.
+    This prevents LLMs from putting almost every correct answer in A while
+    preserving exactly four options and the original correct option text.
+    """
+    out = dict(data)
+    opts = dict(out.get("options", {}) or {})
+    old_letter = str(out.get("answer", "")).strip().upper()
+    target_letter = str(target_letter or "").strip().upper()
+    if old_letter not in opts or target_letter not in opts or old_letter == target_letter:
+        return out
+
+    opts[old_letter], opts[target_letter] = opts[target_letter], opts[old_letter]
+    out["options"] = opts
+    out["answer"] = target_letter
+    out["explanation"] = _remap_explanation_letters(
+        out.get("explanation", ""),
+        {old_letter: target_letter, target_letter: old_letter},
+    )
+    return out
+
+
 def _build_json_repair_prompt(raw: str) -> str:
     return f"""Repair the following malformed MCQ response into ONLY valid JSON.
 
@@ -475,13 +739,14 @@ def generate_mcq(
     llm_fn,
     language: str = "en",
 ) -> tuple[dict | None, str]:
-    """Returns (mcq_data, tier) where tier = "A" | "B". (None, "") on failure."""
-    tier   = "A" if len(distractors) >= TIER_B_THRESHOLD else "B"
-    prompt = (
-        _build_tier_a_prompt(anchor, distractors[:3], bloom_level, language)
-        if tier == "A"
-        else _build_tier_b_prompt(anchor, bloom_level, language)
-    )
+    """Returns (mcq_data, tier) where tier = "A" | "B" | "C". (None, "") on failure."""
+    tier = _tier_for_distractors(len(distractors))
+    if tier == "A":
+        prompt = _build_tier_a_prompt(anchor, distractors[:3], bloom_level, language)
+    elif tier == "B":
+        prompt = _build_tier_b_prompt(anchor, distractors[:2], bloom_level, language)
+    else:
+        prompt = _build_tier_c_prompt(anchor, bloom_level, language)
     data = _call_llm(prompt, anchor.get("ku_id", "?"), llm_fn)
     return (data, tier) if data else (None, "")
 
@@ -533,8 +798,17 @@ def run_mcq_generation(
         _log(f"  type={anchor['type']}  bloom={bloom_lvl}  prominence={prominence}")
 
         distractor_kus = pass2.get_distractors(ku_id, n=3)
-        tier_label     = "A" if len(distractor_kus) >= TIER_B_THRESHOLD else "B"
+        tier_label     = _tier_for_distractors(len(distractor_kus))
         _log(f"  distractors: {len(distractor_kus)} → Tier {tier_label}")
+
+        for j, d in enumerate(distractor_kus, 1):
+            source = d.get("_distractor_source", "unknown")
+            rel    = d.get("_distractor_relation") or "-"
+            score  = d.get("_distractor_score", "?")
+            _log(
+                f"    [{j}] {str(d.get('concept', ''))[:34]} | "
+                f"type={d.get('type', '?')} | source={source} | rel={rel} | score={score}"
+            )
 
         mcq_data, tier = generate_mcq(anchor, distractor_kus, bloom_lvl, llm_fn, language)
         if mcq_data is None:
@@ -542,6 +816,11 @@ def run_mcq_generation(
             if i < len(anchors):
                 time.sleep(delay_between)
             continue
+        target_answer = _target_answer_letter(len(mcqs))
+        old_answer = mcq_data.get("answer", "").upper()
+        mcq_data = _rebalance_answer_slot(mcq_data, target_answer)
+        if old_answer != mcq_data.get("answer"):
+            _log(f"  answer slot: {old_answer} → {mcq_data.get('answer')}")
 
         mcqs.append(MCQItem(
             mcq_id            = f"{ku_id}_{bloom_lvl}",
@@ -566,7 +845,8 @@ def run_mcq_generation(
     mcqs.sort(key=lambda m: m.priority)
     n_a = sum(1 for m in mcqs if m.distractor_tier == "A")
     n_b = sum(1 for m in mcqs if m.distractor_tier == "B")
-    _log(f"\n[MCQ] done: {len(mcqs)}/{len(anchors)}  (Tier A={n_a}  Tier B={n_b})")
+    n_c = sum(1 for m in mcqs if m.distractor_tier == "C")
+    _log(f"\n[MCQ] done: {len(mcqs)}/{len(anchors)}  (Tier A={n_a}  Tier B={n_b}  Tier C={n_c})")
     return mcqs
 
 
@@ -580,6 +860,7 @@ def run_cross_mcq_generation(
     language: str = "en",
     max_questions: int | None = MAX_CROSS_MCQS,
     max_per_ku: int = MAX_CROSS_PER_KU,
+    answer_offset: int = 0,
 ) -> list[MCQItem]:
     """
     Generate cross-concept MCQs from graph edges in Pass2Result.
@@ -609,6 +890,7 @@ def run_cross_mcq_generation(
     n_skip_same       = 0
     n_skip_duplicate  = 0
     n_skip_per_ku     = 0
+    n_skip_quality    = 0
     seen_pairs: set[tuple[str, str, str]] = set()
     per_ku_counts: dict[str, int] = {}
     for (id_a, id_b), relation in pass2.edge_types.items():
@@ -631,6 +913,15 @@ def run_cross_mcq_generation(
         if not ca or not cb or ca == cb:
             n_skip_same += 1
             continue
+        quality, quality_reason = _cross_edge_quality(ku_a, ku_b, relation)
+        min_quality = _CROSS_QUALITY_THRESHOLD.get(relation, 50)
+        if quality < min_quality:
+            _log(
+                f"  [CrossMCQ] skip edge [{relation}] {id_a}â†”{id_b} â€” "
+                f"quality={quality}<{min_quality} ({quality_reason})"
+            )
+            n_skip_quality += 1
+            continue
         pair_key = (min(ca, cb), max(ca, cb), relation)
         if pair_key in seen_pairs:
             n_skip_duplicate += 1
@@ -650,10 +941,11 @@ def run_cross_mcq_generation(
 
     _log(f"[CrossMCQ] eligible edges: {len(edges)}  "
          f"(skipped structural={n_skip_structural}  non-anchor={n_skip_anchor})")
-    if n_skip_stale or n_skip_same or n_skip_duplicate or n_skip_per_ku:
+    if n_skip_stale or n_skip_same or n_skip_duplicate or n_skip_per_ku or n_skip_quality:
         _log(
             f"[CrossMCQ] cleanup skipped: stale={n_skip_stale}  "
-            f"same={n_skip_same}  duplicate={n_skip_duplicate}  per_ku={n_skip_per_ku}"
+            f"same={n_skip_same}  duplicate={n_skip_duplicate}  "
+            f"per_ku={n_skip_per_ku}  quality={n_skip_quality}"
         )
     if not edges:
         return []
@@ -677,6 +969,11 @@ def run_cross_mcq_generation(
             if i < len(edges):
                 time.sleep(delay_between)
             continue
+        target_answer = _target_answer_letter(answer_offset + len(mcqs))
+        old_answer = mcq_data.get("answer", "").upper()
+        mcq_data = _rebalance_answer_slot(mcq_data, target_answer)
+        if old_answer != mcq_data.get("answer"):
+            _log(f"  answer slot: {old_answer} → {mcq_data.get('answer')}")
 
         pages = sorted(set(ku_a.get("source_pages", []) + ku_b.get("source_pages", [])))
         mcqs.append(MCQItem(

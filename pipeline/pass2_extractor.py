@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import time
 import sys
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -50,7 +51,14 @@ def _is_recap(label: str) -> bool:
 def _is_skip(label: str) -> bool:
     """Return True for segments that should be entirely skipped (lab, references, etc.)."""
     low = label.lower()
-    return any(kw in low for kw in _SKIP_KW)
+    for kw in _SKIP_KW:
+        kw = kw.strip().lower()
+        if not kw:
+            continue
+        # Avoid false positives such as "lab" matching "labeling".
+        if re.search(rf"(?<![a-z0-9]){re.escape(kw)}(?![a-z0-9])", low):
+            return True
+    return False
 
 
 # ── Result dataclass ───────────────────────────────────────────────────────
