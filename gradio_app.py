@@ -2016,12 +2016,16 @@ def get_stats_html(mcqs_json: str, lang: str) -> str:
 
 def _gforms_status_html() -> str:
     try:
-        from pipeline.google_forms_exporter import auth_mode, has_credentials_file
+        from pipeline.google_forms_exporter import auth_mode, has_credentials_file, has_service_account
         mode = auth_mode()
         if mode == "service_account":
             return "<span style='color:#27AE60'>🟢 Sẵn sàng (Service Account)</span>"
         if mode == "oauth":
             return "<span style='color:#27AE60'>🟢 Đã kết nối Google</span>"
+        if has_service_account():
+            return "<span style='color:#E74C3C'>🔴 GOOGLE_SERVICE_ACCOUNT_JSON không hợp lệ</span>"
+        if os.getenv("SPACE_ID") or os.getenv("HF_SPACE_ID"):
+            return "<span style='color:#F39C12'>⚠ HF Spaces: thiếu GOOGLE_SERVICE_ACCOUNT_JSON trong Secrets</span>"
         if has_credentials_file():
             return "<span style='color:#888'>🔴 Chưa kết nối — nhấn Kết nối Google</span>"
         return "<span style='color:#F39C12'>⚠ Thiếu credentials.json</span>"
@@ -2384,9 +2388,10 @@ def build_app():
                         gr.Markdown("#### 📝 Google Forms\nTạo form với auto-grading")
                         gforms_status = gr.HTML(_gforms_status_html())
                         from pipeline.google_forms_exporter import has_service_account
+                        is_hf_space = bool(os.getenv("SPACE_ID") or os.getenv("HF_SPACE_ID"))
                         gforms_connect_btn = gr.Button(
                             "Kết nối Google", variant="secondary", size="sm",
-                            visible=not has_service_account(),
+                            visible=(not has_service_account() and not is_hf_space),
                         )
                         gforms_title = gr.Textbox(
                             label="Tên form",
@@ -2516,6 +2521,8 @@ def build_app():
 
         # Google Forms
         def on_gforms_connect():
+            if os.getenv("SPACE_ID") or os.getenv("HF_SPACE_ID"):
+                return "<span style='color:#F39C12'>⚠ HF Spaces không dùng OAuth local. Hãy thêm GOOGLE_SERVICE_ACCOUNT_JSON vào Secrets.</span>"
             try:
                 from pipeline.google_forms_exporter import authenticate
                 success, msg = authenticate()
@@ -2745,6 +2752,10 @@ if __name__ == "__main__":
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
     demo = build_app()
+    try:
+        demo.queue(default_concurrency_limit=1)
+    except TypeError:
+        demo.queue()
     demo.launch(
         server_name="0.0.0.0",
         server_port=7860,

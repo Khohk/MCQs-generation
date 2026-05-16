@@ -141,6 +141,8 @@ def export_to_google_forms(
     """
     creds = _get_valid_credentials()
     if creds is None:
+        if has_service_account():
+            return False, "GOOGLE_SERVICE_ACCOUNT_JSON không hợp lệ. Hãy copy toàn bộ nội dung service-account JSON vào HF Secrets."
         return False, "Chưa xác thực. Vui lòng kết nối Google hoặc cài GOOGLE_SERVICE_ACCOUNT_JSON."
 
     try:
