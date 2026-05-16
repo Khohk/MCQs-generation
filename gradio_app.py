@@ -2206,7 +2206,7 @@ def get_final_score(mcqs_json: str, answers: dict) -> str:
 # ── Build Gradio UI ────────────────────────────────────────────────
 
 def build_app():
-    with gr.Blocks(title="AI MCQ Generator") as demo:
+    with gr.Blocks(title="AI MCQ Generator", theme=gr.themes.Soft(), js=_GRAPH_BLOCKS_JS_V2) as demo:
 
         # State — khai báo bên trong Blocks context
         mcqs_state       = gr.State(value=None)
@@ -2750,6 +2750,4 @@ if __name__ == "__main__":
         server_port=7860,
         share=False,
         show_error=True,
-        theme=gr.themes.Soft(),
-        js=_GRAPH_BLOCKS_JS_V2,
     )
